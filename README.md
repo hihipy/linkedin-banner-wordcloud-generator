@@ -63,4 +63,4 @@ The word cloud image is saved as `linkedin_banner.png`, and the terms with their
 
 To customize the script further, you can modify the `common_terms` dictionary to include different terms and weights or add more color palettes to the `color_palettes` dictionary.
 
-linkedin-banner-wordcloud-generator © 2024 by Philip Bachas-Daunert is licensed under Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International
+linkedin-banner-wordcloud-generator © 2024 by Philip Bachas-Daunert is licensed under [Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International](https://creativecommons.org/licenses/by-nc-nd/4.0/)
