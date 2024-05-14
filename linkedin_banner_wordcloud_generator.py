@@ -5,54 +5,27 @@ from wordcloud import WordCloud
 # Define a dictionary of common terms with their respective weights
 # to indicate frequency or importance in the word cloud.
 common_terms = {
-    "python": 10000, "r": 9500, "sql": 9000, "markdown": 8500, "bash": 7500,
-    "numpy": 7000, "pandas": 6500, "matplotlib": 6000, "seaborn": 5500, "ggplot2": 5000,
-    "tensorflow": 4500, "keras": 4000, "scikit_learn": 3500, "jupyter_notebook": 3000, "docker": 2500,
-    "kubernetes": 2000, "git": 1800, "github": 1600, "rest_api": 1400, "json": 1200, "xml": 1100,
-    "regular_expressions": 1000, "svm": 900, "natural_language_processing": 800, "convolutional_neural_network": 700,
-    "long_short_term_memory": 600, "roc_curve": 500, "auc_score": 400, "k_nearest_neighbors": 300,
-    "big_data": 200, "apache_hadoop": 1000, "apache_spark": 900, "apache_airflow": 800, "apache_kafka": 700,
-    "machine_learning": 600, "artificial_intelligence": 500, "neural_network": 400, "clustering": 300,
-    "classification": 200, "regression": 100, "anova": 900, "t_test": 800, "bayesian_statistics": 700,
-    "markov_chain_monte_carlo": 600, "monte_carlo_simulation": 500, "markov_chain": 400, "decision_trees": 300,
-    "random_forest": 200, "support_vector_machines": 100, "logistic_regression": 1000,
-    "linear_regression": 900, "polynomial_regression": 800, "ridge_regression": 700,
-    "lasso_regression": 600, "elastic_net_regression": 500, "cross_validation": 400,
-    "regularization": 300, "hyperparameter_tuning": 200, "ensemble_methods": 100,
-    "gradient_boosting": 1000, "bagging": 900, "unsupervised_learning": 800,
-    "reinforcement_learning": 700, "supervised_learning": 600, "flask": 500,
-    "django": 400, "r_shiny": 300, "biopython": 200, "sympy": 100, "scipy": 1000, "plotly": 900,
-    "bokeh": 800, "altair": 700, "plotly_dash": 600, "virtualenv": 500, "pip": 400, "conda": 300,
-    "vagrant": 200, "ansible": 100, "terraform": 1000, "devops": 900, "agile_methodology": 800,
-    "scrum": 700, "kanban": 600, "join": 500, "select": 400, "where_clause": 300, "order_by": 200,
-    "group_by": 100, "having_clause": 1000, "union": 900, "intersect": 800, "except": 700,
-    "limit": 600, "inner_join": 500, "left_join": 400, "right_join": 300, "full_join": 200,
-    "index": 100, "view": 1000, "trigger": 900, "stored_procedure": 800, "cursor": 600,
-    "rollback": 500, "commit": 400, "savepoint": 300, "transaction": 200, "vim": 100,
-    "emacs": 1000, "nano": 900, "sed": 800, "awk": 700, "grep": 600, "find": 500, "sort": 400,
-    "tar": 300, "gzip": 200, "bzip2": 100, "xz": 1000, "cron": 900, "systemd": 800, "init": 700,
-    "daemon": 600, "shell_scripting": 500, "loop": 400, "if_statement": 300, "else_clause": 200, "elif_clause": 100,
-    "case": 1000, "switch": 900, "function": 800, "array": 700, "variable": 600,
-    "error_handling": 500, "debugging": 400, "unit_testing": 300, "integration_testing": 200,
-    "functional_testing": 100, "performance_testing": 1000, "security_testing": 900,
-    "load_testing": 800, "stress_testing": 700, "penetration_testing": 600,
-    "optimization": 500, "profiling": 400, "benchmarking": 300, "logging": 200,
-    "monitoring": 100, "alerting": 1000, "visualization": 900, "reporting": 800,
-    "analysis": 700, "prediction": 600, "forecasting": 500, "modeling": 400, "sampling": 300,
-    "estimation": 200, "inference": 100, "dimensionality_reduction": 1000, "feature_selection": 900,
-    "feature_engineering": 800, "data_cleaning": 700, "data_preprocessing": 600,
-    "data_wrangling": 500, "data_munging": 400, "data_transformation": 300,
-    "data_integration": 200, "data_migration": 100, "data_warehousing": 1000,
-    "data_lake": 900, "data_mart": 800, "olap": 700, "oltp": 600, "etl": 500, "elt": 400,
-    "data_pipeline": 300, "data_flow": 200, "data_governance": 100, "data_security": 1000,
-    "data_privacy": 900, "data_ethics": 800, "data_compliance": 700, "data_audit": 600,
-    "data_quality": 500, "data_accuracy": 400, "data_reliability": 300, "data_validity": 200,
-    "data_completeness": 100, "data_consistency": 1000, "data_timeliness": 900,
-    "data_lineage": 800, "data_provenance": 700, "data_catalog": 600,
-    "metadata_management": 500, "metadata_extraction": 400, "metadata_indexing": 300,
-    "metadata_storage": 200, "metadata_search": 100, "metadata_analysis": 1000,
-    "metadata_visualization": 900, "metadata_reporting": 800, "metadata_security": 700,
-    "metadata_privacy": 600
+    "Financial_Advisory": 2000, "Data_Analysis": 10000, "Auditing": 4000,
+    "Financial_Modeling": 6000, "Database_Management": 7000, "Power_BI": 7000,
+    "Tableau": 7000, "SQL": 9500, "R": 9000, "Python": 10000, "Machine_Learning": 9500,
+    "Business_Analytics": 9000, "Data_Analytics": 10000, "Financial_Analysis": 6000,
+    "Audit_Assurance": 3000, "Financial_Services": 5000, "CICPA": 1000, "FRM": 1000,
+    "CFA_Level_III": 1000, "Transaction_Services": 4000, "Data-driven_financial_analysis": 8000,
+    "Real_estate": 2000, "Healthcare": 2000, "Education": 2000, "E-commerce": 2000,
+    "Manufacturing": 2000, "Advanced_data_analytics": 8500, "Transactional_operations": 4000,
+    "Investment_value": 5000, "Power_Query": 6000, "Earnings_quality": 4000,
+    "Deal_negotiation": 4000, "Financial_policies": 4000, "Income_data": 5000,
+    "Decision-making_processes": 7000, "Audit_planning": 4000, "Project_scope": 3000,
+    "Milestone_planning": 3000, "Compliance": 5000, "Risk_exposure": 5000,
+    "Quantitative_analyses": 8000, "Qualitative_analyses": 8000, "Investment_profits": 4000,
+    "Strategic_fund_management": 5000, "Financial_guidance": 5000, "Financial_forecast": 7000,
+    "Budget_expenditures": 5000, "Audit_procedures": 4000, "IFRS": 3000, "HKFRS": 3000,
+    "CAS_standards": 3000, "AI-enhanced_Gradio_interface": 6000, "Financial_data_queries": 7000,
+    "Automated_processing": 7000, "Large_Language_Models": 8500, "Time_series_models": 9000,
+    "Sales_forecasting": 8500, "Visual_trend_analysis": 7000, "Scalable_Database_Management_System": 7000,
+    "Relational_schemas": 6000, "ERDs": 6000, "Data_dictionary": 6000, "SQL_scripts": 7000,
+    "Operational_efficiency": 7000, "Data_integrity": 7000, "CFA_ESG": 1000, "SAC": 1000,
+    "English": 2000, "Mandarin": 2000
 }
 
 # Randomize weights within their logical ranges to introduce variability
@@ -61,29 +34,50 @@ randomized_terms = {
     for term, weight in common_terms.items()
 }
 
-# Define available color palettes with a dictionary mapping names to colormap strings
+# Ask the user to choose between a light and dark background
+print("Choose a background color:")
+background_color_options = {
+    "1": "white",
+    "2": "black"
+}
+while True:
+    print("1. Light (White) - Ideal for a clean and professional look.")
+    print("2. Dark (Black) - Great for highlighting colors and a modern aesthetic.")
+    background_choice = input("Enter your choice (1 or 2): ")
+    if background_choice in background_color_options:
+        selected_background = background_color_options[background_choice]
+        break
+    else:
+        print("Please input only 1 or 2 for the background color choice.")
+
+# Define available color palettes with a dictionary mapping names to colormap strings and descriptions
 color_palettes = {
-    "Vibrant": "turbo",
-    "Monochrome": "gray",
-    "Ocean": "ocean",
-    "Hot": "hot",
-    "Rainbow": "rainbow",
-    "Viridis": "viridis",
-    "Plasma": "plasma",
-    "Inferno": "inferno",
-    "Magma": "magma",
+    "Vibrant": ("turbo", "A dynamic range of colors for a lively and energetic appearance."),
+    "Monochrome": ("gray", "A grayscale palette for a sophisticated and timeless look."),
+    "Ocean": ("ocean", "Blues and greens evoke the calm and depth of the sea."),
+    "Hot": ("hot", "Warm colors like reds and oranges for a bold, intense effect."),
+    "Rainbow": ("rainbow", "All the colors of the rainbow for a playful and inclusive feel."),
+    "Viridis": ("viridis", "A smooth gradient from yellow-green to dark blue, modern and clear."),
+    "Plasma": ("plasma", "Bright, luminous colors transitioning from purple to yellow."),
+    "Inferno": ("inferno", "Deep reds to bright yellows, capturing the essence of heat and energy."),
+    "Magma": ("magma", "Rich purples and reds for a mysterious and powerful vibe.")
 }
 
 # Present the available color palettes to the user and ask for their choice
 print("Available color palettes:")
-for i, palette in enumerate(color_palettes.keys(), 1):
-    print(f"{i}. {palette}")
-choice = int(input("Choose a color palette (enter the number): ")) - 1
-selected_palette = list(color_palettes.values())[choice]
+for i, (palette, description) in enumerate(color_palettes.items(), 1):
+    print(f"{i}. {palette} - {description}")
+while True:
+    palette_choice = input("Choose a color palette (enter the number): ")
+    if palette_choice.isdigit() and int(palette_choice) in range(1, len(color_palettes) + 1):
+        selected_palette = list(color_palettes.values())[int(palette_choice) - 1][0]
+        break
+    else:
+        print("Please input only the numbers corresponding to the color palettes.")
 
-# Create a word cloud with the corrected frequencies using the user-selected colormap
+# Create a word cloud with the corrected frequencies using the user-selected colormap and background color
 wordcloud = WordCloud(
-    width=1584, height=396, background_color='black', colormap=selected_palette
+    width=1584, height=396, background_color=selected_background, colormap=selected_palette
 ).generate_from_frequencies(randomized_terms)
 
 # Display the word cloud using matplotlib
