@@ -15,6 +15,8 @@ This Python script generates a customizable word cloud from a predefined list of
 
 - **Output Saving**: Saves the ranked list of terms and their weights to a text file, `common_words.txt`.
 
+- **File Size Management**: Ensures the output PNG file size is under 3MB, adjusting the image quality if necessary.
+
 ## LinkedIn Banner Size
 As of the current date, the LinkedIn banner size used in this script is 1584x396 pixels, ensuring that the generated word cloud fits perfectly as a LinkedIn profile banner.
 
@@ -24,12 +26,14 @@ To run this script, ensure you have the following Python libraries installed:
 
 - `matplotlib`: For generating and displaying the word cloud image.
 - `wordcloud`: For creating the word cloud from frequencies.
-- `random`: For randomizing term weights.
+- `PIL` (from `Pillow`): For image processing and file size adjustment.
+- `tqdm`: For displaying a progress bar during file size adjustment.
+- `os`: For checking file size.
 
 You can install the necessary libraries using pip:
 
 ```bash
-pip install matplotlib wordcloud
+pip install matplotlib wordcloud Pillow tqdm
 ```
 
 ## Usage
@@ -39,6 +43,8 @@ pip install matplotlib wordcloud
 2. **Select a Background Color and Color Palette**: Enter the number corresponding to your chosen background color and color palette when prompted.
 
 3. **View and Save Outputs**: The script will display the word cloud in the chosen color scheme and save it as `linkedin_banner.png`. Additionally, it will save the sorted terms and their weights to `common_words.txt`.
+
+4. **File Size Adjustment**: The script ensures that the output image file size is under 3MB, adjusting the quality as necessary.
 
 ## Code Overview
 
@@ -61,6 +67,10 @@ The `WordCloud` class from the `wordcloud` library generates the word cloud with
 ### Saving Outputs
 
 The word cloud image is saved as `linkedin_banner.png`, fitting the LinkedIn banner size. The terms with their adjusted weights are saved in `common_words.txt`.
+
+### File Size Management
+
+The script ensures the output image file size is under 3MB. If the initial file size exceeds this limit, the image quality is adjusted downwards in increments until the file size is within the acceptable range.
 
 ## Customization
 
