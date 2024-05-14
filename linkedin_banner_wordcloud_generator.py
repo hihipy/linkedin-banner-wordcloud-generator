@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from wordcloud import WordCloud
 
 # Define a dictionary of common terms with their respective weights
-# to indicate frequency or importance in the word cloud.
+# to indicate frequency or importance in the word cloud. Here is an example of a list of terms
 common_terms = {
     "Financial_Advisory": 2000, "Data_Analysis": 10000, "Auditing": 4000,
     "Financial_Modeling": 6000, "Database_Management": 7000, "Power_BI": 7000,
