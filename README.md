@@ -1,40 +1,63 @@
-# LinkedIn Banner Wordcloud Generator
+# LinkedIn Banner Word Cloud Generator
 
-A Python script that generates a word cloud from a list of terms, sized for LinkedIn banners (1584x396 pixels). Supports customizable colors, randomized term weights, and automatic file size optimization.
+A Python application that reads your resume (PDF, DOCX, or TXT), extracts professional terms using NLP, and generates a word cloud sized for LinkedIn banners (1584×396 pixels). Supports 18 languages with automatic language detection.
 
 ## Features
 
+- **Resume Parsing:** Reads PDF, DOCX, and TXT files — extracts text automatically.
+- **NLP-Powered Extraction:** Uses spaCy for named-entity recognition, noun phrase extraction, and part-of-speech filtering. Uses YAKE for statistical keyword ranking.
+- **Smart Filtering:** Automatically excludes your name, location, email, dates, section headers, action verbs, and other resume artifacts via header parsing and NER.
+- **Interactive Term Editor:** Review, remove, and promote terms in a sortable table. Add custom terms manually or promote runner-ups.
 - **Background Color Selection:** Choose between light or dark backgrounds.
-- **Color Palettes:** Multiple predefined color palettes with descriptions.
-- **Randomized Weights:** Adjusts term frequency within a range to add variability.
-- **File Size Management:** Ensures output is under 3MB by adjusting quality if needed.
-- **Output Files:** Saves the word cloud as PNG and exports ranked terms to a text file.
+- **Color Palettes:** Multiple predefined palettes — Vibrant, Mono, Ocean, Hot, Rainbow, Viridis, Plasma, and Inferno.
+- **Compound Term Separator:** Display terms as `Data_Science` or `Data Science`.
+- **Multilingual Support:** 18 languages with per-language exclusion lists and spaCy models.
+- **File Size Management:** Ensures output is under 3MB using color quantization.
+- **Export:** Saves the word cloud as PNG and exports ranked terms (main + runner-ups + excluded) to a text file.
 
 ## Requirements
 
-Python 3.6+ and the following libraries:
-
-```bash
-pip install matplotlib wordcloud Pillow tqdm
-```
+Python 3.9+ — all other dependencies install automatically on first run.
 
 ## Usage
 
-1. **Run the Script:** Execute in a Python environment.
-2. **Select Background Color:** Choose light or dark when prompted.
-3. **Select Color Palette:** Pick from the available options.
-4. **View Output:** The word cloud displays and saves as `linkedin_banner.png`. Terms and weights save to `common_words.txt`.
+1. Place `linkedin_banner_wordcloud_generator.py` and `exclusions.json` in the same folder.
+2. Run the script:
+
+```bash
+python linkedin_banner_wordcloud_generator.py
+```
+
+3. On first run, missing packages (spaCy, YAKE, wordcloud, Pillow, pdfplumber, etc.) and the spaCy English model are installed automatically.
+4. Click **Browse** to select your resume file.
+5. Click **Analyse Resume** to extract and score terms.
+6. Review the term table — click column headers to sort, remove unwanted terms, promote runner-ups.
+7. Choose your background, palette, and separator style under **Appearance**.
+8. Click **Generate Word Cloud** to preview, then **Save As** to export the PNG.
 
 ## Customization
 
-Modify the `common_terms` dictionary to change terms and weights, or add color palettes to the `color_palettes` dictionary.
+Edit `exclusions.json` to control what gets filtered out. Categories include:
+
+- **section_headers** — Resume headings (Education, Experience, etc.)
+- **action_verbs_and_filler** — Managed, Developed, Responsible for, etc.
+- **degree_terms** — Bachelor, Master, PhD, etc.
+- **date_terms** — January, Present, etc.
+- **metadata** — Page, Total, References, etc.
+- **never_alone** — Words that are valid in compounds but not solo (e.g., "level", "key", "field")
+- **banned_substrings** — Patterns to reject in compound terms (e.g., "stack python", "json output")
+
+All categories are organized by language. Changes take effect on the next run.
 
 ## Technical Details
 
-- **Dimensions:** 1584x396 pixels (LinkedIn banner size)
+- **Dimensions:** 1584×396 pixels (LinkedIn banner size)
+- **NLP Pipeline:** spaCy (NER, noun chunks, POS tagging) + YAKE (statistical keyword extraction)
+- **Term Limit:** Top 60 terms displayed, next 30 available as runner-ups
+- **Weight Range:** 1,000–10,000 (log-scaled from frequency counts)
 - **Word Cloud:** Generated using the `wordcloud` library
-- **Visualization:** Displayed with `matplotlib`
-- **Image Processing:** Uses Pillow for quality adjustment
+- **Visualization:** Previewed with `matplotlib`, exported with Pillow
+- **Logging:** Detailed logs saved to `~/.wordcloud_generator/app.log`
 
 ## License
 
