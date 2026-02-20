@@ -1,22 +1,3 @@
-"""
-LinkedIn Banner Word Cloud Generator — Multilingual, Offline, NLP-Powered.
-
-Tkinter GUI application that reads a resume/CV in any supported language
-(PDF, DOCX, or TXT), extracts weighted professional terms using spaCy
-and YAKE, and generates a LinkedIn-sized (1584 x 396) word cloud banner.
-
-Exclusion lists (stopwords, section headers, action verbs, etc.) are
-stored in ``exclusions.json`` next to this script so they can be edited
-without touching the code.
-
-Dependencies:
-    pip install spacy yake langdetect wordcloud matplotlib Pillow tqdm
-    pip install pdfplumber python-docx
-    python -m spacy download xx_ent_wiki_sm  (optional)
-
-License: CC BY-NC-SA 4.0
-"""
-
 # !! MUST come before ANY third-party import — confection triggers the
 # !! warning the instant it is imported (even as a transitive dependency).
 import warnings                                          # noqa: E402
@@ -48,13 +29,6 @@ import unicodedata
 from collections import Counter
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Optional
-
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt          # noqa: E402
-from PIL import Image, ImageTk           # noqa: E402
-from wordcloud import WordCloud          # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -81,22 +55,57 @@ log.info("Python %s on %s", sys.version, sys.platform)
 
 
 # ---------------------------------------------------------------------------
-# spaCy availability probe
+# Auto-install — installs missing packages on first run, then continues.
 # ---------------------------------------------------------------------------
+def _auto_install():
+    """Check for missing packages and install them automatically."""
+    import subprocess
+    # Map: import name → pip package name
+    deps = {
+        "spacy": "spacy",
+        "yake": "yake",
+        "langdetect": "langdetect",
+        "wordcloud": "wordcloud",
+        "matplotlib": "matplotlib",
+        "PIL": "Pillow",
+        "pdfplumber": "pdfplumber",
+        "docx": "python-docx",
+    }
+    missing = []
+    for mod, pip_name in deps.items():
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(pip_name)
 
-def _probe_spacy() -> bool:
-    """Return True if spaCy can actually create a blank pipeline."""
+    if missing:
+        print(f"\n  Installing {len(missing)} missing package(s): {', '.join(missing)}")
+        print("  (one-time setup, may take a minute)\n")
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--quiet"] + missing
+        )
+        print()
+
+    # Ensure at least one spaCy model is downloaded.
     try:
         import spacy
-        _ = spacy.blank("en")
-        log.info("spaCy probe: OK (version %s)", spacy.__version__)
-        return True
-    except Exception as exc:
-        log.warning("spaCy probe: FAILED (%s: %s)", type(exc).__name__, exc)
-        return False
+        spacy.load("en_core_web_sm")
+    except Exception:
+        print("  Downloading spaCy English model (one-time) ...")
+        subprocess.check_call(
+            [sys.executable, "-m", "spacy", "download", "en_core_web_sm", "--quiet"]
+        )
+        print()
 
+_auto_install()
 
-SPACY_USABLE: bool = _probe_spacy()
+import spacy                             # noqa: E402
+import matplotlib                        # noqa: E402
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt          # noqa: E402
+from PIL import Image, ImageTk           # noqa: E402
+from wordcloud import WordCloud          # noqa: E402
+log.info("spaCy version %s", spacy.__version__)
 
 
 # ---------------------------------------------------------------------------
@@ -112,8 +121,8 @@ NOUN_PHRASE_MULTIPLIER = 3
 YAKE_MULTIPLIER_CAP = 8
 TOKEN_MULTIPLIER = 1
 MANUAL_ADD_WEIGHT = 7000
-WINDOW_MIN_WIDTH = 960
-WINDOW_MIN_HEIGHT = 720
+WINDOW_MIN_WIDTH = 1060
+WINDOW_MIN_HEIGHT = 860
 
 FILLER_PATTERNS = [
     re.compile(r"^\d+$"),
@@ -251,6 +260,13 @@ def _build_contaminants() -> frozenset[str]:
 
     # All never_alone terms are also compound contaminants.
     words.update(ALL_NEVER_ALONE)
+
+    # Action verbs and filler — these poison compounds like
+    # "Managed_Georgetown" or "Developed_Excel".
+    for lang_set in ACTION_VERBS_AND_FILLER.values():
+        for w in lang_set:
+            if len(w) >= 3 and " " not in w:
+                words.add(w.lower())
 
     # Section-header words that are purely structural.
     structural_headers = {
@@ -473,16 +489,14 @@ def detect_language(text: str) -> str:
 def build_stopwords(lang_code: str) -> set[str]:
     """Assemble stopword set for *lang_code*."""
     sw: set[str] = set()
-    if SPACY_USABLE:
-        _map = {"en": "en", "es": "es", "fr": "fr", "de": "de", "pt": "pt",
-                "it": "it", "nl": "nl", "ca": "ca", "ru": "ru",
-                "zh-cn": "zh", "zh-tw": "zh", "ja": "ja", "ko": "ko",
-                "ar": "ar", "hi": "hi", "pl": "pl", "sv": "sv"}
-        try:
-            import spacy
-            sw.update(spacy.blank(_map.get(lang_code, lang_code)).Defaults.stop_words)
-        except Exception:
-            pass
+    _map = {"en": "en", "es": "es", "fr": "fr", "de": "de", "pt": "pt",
+            "it": "it", "nl": "nl", "ca": "ca", "ru": "ru",
+            "zh-cn": "zh", "zh-tw": "zh", "ja": "ja", "ko": "ko",
+            "ar": "ar", "hi": "hi", "pl": "pl", "sv": "sv"}
+    try:
+        sw.update(spacy.blank(_map.get(lang_code, lang_code)).Defaults.stop_words)
+    except Exception:
+        pass
 
     def _add(src):
         sw.update(src.get("universal", set()))
@@ -498,14 +512,7 @@ def build_stopwords(lang_code: str) -> set[str]:
 
 
 def load_spacy_model(lang_code):
-    """Load best spaCy model or return (None, None)."""
-    if not SPACY_USABLE:
-        log.debug("load_spacy_model: skipped (SPACY_USABLE=False)")
-        return None, None
-    try:
-        import spacy
-    except ImportError:
-        return None, None
+    """Load the best available spaCy model for *lang_code*."""
     prefs = {
         "en": ["en_core_web_sm"], "es": ["es_core_news_sm"],
         "fr": ["fr_core_news_sm"], "de": ["de_core_news_sm"],
@@ -520,32 +527,22 @@ def load_spacy_model(lang_code):
             nlp = spacy.load(name)
             log.info("Loaded spaCy model: %s", name)
             return nlp, name
-        except Exception:
-            log.debug("Model '%s' not available, trying next", name)
+        except OSError:
+            log.debug("Model '%s' not installed, trying next", name)
             continue
-    try:
-        log.info("Falling back to spacy.blank('xx')")
-        return spacy.blank("xx"), "xx (blank)"
-    except Exception:
-        log.warning("All spaCy models failed for lang '%s'", lang_code)
-        return None, None
+    # Last resort — blank pipeline (no NER, but POS still works).
+    log.warning("No trained model for '%s', using blank pipeline", lang_code)
+    return spacy.blank("xx"), "xx (blank)"
 
 
 def yake_extract(text, lang):
     """YAKE keyword extraction (lower score = more relevant)."""
-    try:
-        import yake
-        ext = yake.KeywordExtractor(
-            lan=lang.split("-")[0], n=2, dedupLim=0.7,
-            dedupFunc="seqm", windowsSize=1, top=80,
-        )
-        return ext.extract_keywords(text)
-    except Exception:
-        tokens = [t for t in re.findall(r"[\w\-\+\#]+", text, re.UNICODE) if len(t) > 2]
-        uni = Counter(tokens)
-        bi = Counter(f"{tokens[i]} {tokens[i+1]}" for i in range(len(tokens)-1))
-        return ([(t, 1/(c+1)) for t, c in bi.most_common(50)]
-                + [(t, 1/(c+1)) for t, c in uni.most_common(50)])[:80]
+    import yake
+    ext = yake.KeywordExtractor(
+        lan=lang.split("-")[0], n=2, dedupLim=0.7,
+        dedupFunc="seqm", windowsSize=1, top=80,
+    )
+    return ext.extract_keywords(text)
 
 
 def matches_filler_pattern(text):
@@ -611,6 +608,10 @@ def is_valid_term(term, excluded, stopwords):
             w_clean = re.sub(r"['\u2019]s?$", "", w)
             if w_clean in COMPOUND_CONTAMINANTS:
                 return False
+            # Also reject if a component is a dynamically-excluded term
+            # (e.g. person's name, city from header parsing or NER).
+            if w_clean in excluded:
+                return False
 
         # Repeated words ("Department_Department").
         if len(set(words)) == 1:
@@ -628,9 +629,115 @@ def is_valid_term(term, excluded, stopwords):
     return True
 
 
+def _extract_header_exclusions(text: str) -> set[str]:
+    """Parse the resume header (first ~500 chars) and return terms to exclude.
+
+    This catches the person's name, city, state, country, email fragments,
+    GitHub usernames, LinkedIn slugs, and phone digits — all of which are
+    personal info that should never appear on a word cloud.
+
+    Runs before spaCy NER so personal info is excluded even if the
+    trained model misses something.
+    """
+    excl: set[str] = set()
+    header = text[:600]
+    lines = [ln.strip() for ln in header.splitlines() if ln.strip()]
+    if not lines:
+        return excl
+
+    # --- 1. First non-empty line is almost always the person's name ---
+    name_line = lines[0]
+    # Strip phone numbers and emails that might sit on the same line.
+    name_line = re.sub(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", "", name_line)
+    name_line = re.sub(r"\+?\d[\d\-\.\s\(\)]{7,15}\d", "", name_line)
+    name_line = re.sub(r"https?://\S+", "", name_line)
+    name_line = re.sub(r"github\.com/\S+", "", name_line)
+    name_line = re.sub(r"linkedin\.com/in/\S+", "", name_line)
+    # Whatever remains is likely the name.
+    for word in name_line.split():
+        w = word.strip(string.punctuation).lower()
+        if len(w) >= 2:
+            excl.add(w)
+
+    # --- 2. Scan the full header for contact / location artefacts ---
+    header_lower = header.lower()
+
+    # Email local parts (before @).
+    for m in re.finditer(r"([a-zA-Z0-9._%+-]+)@", header):
+        for part in re.split(r"[._]", m.group(1)):
+            if len(part) >= 2:
+                excl.add(part.lower())
+
+    # GitHub / LinkedIn usernames.
+    for m in re.finditer(r"github\.com/([a-zA-Z0-9_-]+)", header, re.I):
+        excl.add(m.group(1).lower())
+    for m in re.finditer(r"linkedin\.com/in/([a-zA-Z0-9_-]+)", header, re.I):
+        excl.add(m.group(1).lower())
+    # Short form: "in/pbachas" without the full linkedin.com domain.
+    for m in re.finditer(r"(?:^|\s)in/([a-zA-Z0-9_-]+)", header):
+        excl.add(m.group(1).lower())
+
+    # US states (full names and abbreviations).
+    us_states = {
+        "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+        "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
+        "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
+        "maine", "maryland", "massachusetts", "michigan", "minnesota",
+        "mississippi", "missouri", "montana", "nebraska", "nevada",
+        "new hampshire", "new jersey", "new mexico", "new york",
+        "north carolina", "north dakota", "ohio", "oklahoma", "oregon",
+        "pennsylvania", "rhode island", "south carolina", "south dakota",
+        "tennessee", "texas", "utah", "vermont", "virginia", "washington",
+        "west virginia", "wisconsin", "wyoming", "district of columbia",
+    }
+    for st in us_states:
+        if st in header_lower:
+            excl.add(st)
+            for w in st.split():
+                excl.add(w)
+
+    # Country names commonly found on resumes.
+    countries = {
+        "united states", "united kingdom", "canada", "australia", "india",
+        "germany", "france", "spain", "italy", "brazil", "mexico",
+        "argentina", "colombia", "chile", "peru",
+    }
+    for c in countries:
+        if c in header_lower:
+            excl.add(c)
+            for w in c.split():
+                if len(w) >= 3:
+                    excl.add(w)
+
+    # City + State patterns like "Miami, FL" or "Coral Gables, Florida".
+    city_state = re.findall(
+        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*"
+        r"([A-Z]{2}|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)",
+        header,
+    )
+    for city, state in city_state:
+        for w in city.lower().split():
+            excl.add(w)
+        for w in state.lower().split():
+            excl.add(w)
+
+    log.info("Header exclusions: %d terms — %s",
+             len(excl), sorted(excl)[:20])
+    return excl
+
+
 def extract_terms(resume_text, progress_callback=None,
                   lang_override=None, separator="_"):
-    """Full NLP pipeline with YAKE-only fallback."""
+    """Extract weighted professional terms using spaCy + YAKE.
+
+    Pipeline:
+        1. Header parsing   → personal-info exclusions
+        2. spaCy NER        → entity exclusions (names, orgs, locations, dates)
+        3. spaCy noun chunks → candidate skill phrases
+        4. spaCy POS tokens  → candidate single-word skills
+        5. YAKE keywords     → statistically important terms
+        6. Merge, weight, rank → top MAX_TERMS + runner-ups
+    """
     def _ui(msg):
         if progress_callback:
             progress_callback(msg)
@@ -638,6 +745,7 @@ def extract_terms(resume_text, progress_callback=None,
     log.info("extract_terms: %d chars, lang_override=%s, sep='%s'",
              len(resume_text or ""), lang_override, separator)
 
+    # -- Language detection --
     if lang_override:
         lang = lang_override
         _ui(f"Language (manual): {lang}")
@@ -648,146 +756,112 @@ def extract_terms(resume_text, progress_callback=None,
 
     stopwords = build_stopwords(lang)
 
+    # -- 1. Header parsing (always runs) --
+    _ui("Parsing header for personal info \u2026")
+    excluded = _extract_header_exclusions(resume_text)
+
+    # -- 2–4. spaCy: NER, noun phrases, POS tokens --
     _ui("Loading NLP model \u2026")
     nlp, model_name = load_spacy_model(lang)
-    spacy_ok = nlp is not None
+    _ui(f"Model: {model_name}")
 
-    if spacy_ok:
-        _ui(f"Model: {model_name}")
-    else:
-        _ui("spaCy unavailable \u2014 YAKE-only mode.")
-        model_name = "YAKE-only (spaCy unavailable)"
+    _ui("Parsing resume \u2026")
+    doc = nlp(resume_text[:100_000])
+    log.debug("spaCy doc: %d tokens, %d ents", len(doc), len(doc.ents or []))
 
-    excluded, noun_phrases, tech_tokens = set(), [], []
+    # NER exclusions.
+    excl_labels = {
+        "PERSON", "PER", "ORG", "GPE", "LOC", "DATE", "TIME",
+        "MONEY", "CARDINAL", "ORDINAL", "FAC", "NORP", "EVENT",
+        "QUANTITY", "PERCENT",
+    }
+    for ent in (doc.ents or []):
+        if ent.label_ in excl_labels:
+            excluded.add(ent.text.lower().strip())
+            for w in ent.text.lower().split():
+                if len(w) > 2:
+                    excluded.add(w)
+    log.debug("Total exclusions: %d", len(excluded))
 
-    if spacy_ok:
-        try:
-            _ui("Parsing resume \u2026")
-            doc = nlp(resume_text[:100_000])
-            log.debug("spaCy doc: %d tokens, %d ents",
-                      len(doc), len(doc.ents or []))
+    # Noun phrases.
+    _ui("Extracting noun phrases \u2026")
+    noun_phrases = []
+    skip_pos = {"DET", "PRON", "PUNCT", "SPACE", "NUM", "SYM",
+                "ADP", "CCONJ", "SCONJ", "AUX", "PART"}
+    if doc.has_annotation("DEP"):
+        for chunk in doc.noun_chunks:
+            toks = [t for t in chunk
+                    if t.pos_ not in skip_pos
+                    and t.text.lower() not in stopwords
+                    and len(t.text) > 1 and not t.is_stop]
+            if toks:
+                phrase = " ".join(t.text for t in toks).strip()
+                if len(phrase) > 2:
+                    noun_phrases.append(phrase)
+    log.debug("Noun phrases: %d", len(noun_phrases))
 
-            excl_labels = {
-                "PERSON", "PER", "ORG", "GPE", "LOC", "DATE", "TIME",
-                "MONEY", "CARDINAL", "ORDINAL", "FAC", "NORP", "EVENT",
-                "QUANTITY", "PERCENT",
-            }
-            for ent in (doc.ents or []):
-                if ent.label_ in excl_labels:
-                    excluded.add(ent.text.lower().strip())
-                    for w in ent.text.lower().split():
-                        if len(w) > 2:
-                            excluded.add(w)
-            log.debug("NER exclusions: %d entities", len(excluded))
+    # POS-filtered tokens.
+    _ui("Collecting tokens \u2026")
+    tech_tokens = []
+    has_pos = doc.has_annotation("TAG") or doc.has_annotation("POS")
+    for token in doc:
+        txt = token.text.strip()
+        if not txt or len(txt) < 3:
+            continue
+        if txt.lower() in stopwords or txt.lower() in excluded:
+            continue
+        if token.like_num or token.like_email or token.like_url:
+            continue
+        if all(c in string.punctuation for c in txt):
+            continue
+        if has_pos:
+            if token.pos_ not in ("NOUN", "PROPN", "ADJ"):
+                continue
+            if token.is_stop:
+                continue
+        tech_tokens.append(txt)
+    log.debug("Tech tokens: %d", len(tech_tokens))
 
-            _ui("Extracting noun phrases \u2026")
-            skip = {"DET", "PRON", "PUNCT", "SPACE", "NUM", "SYM",
-                    "ADP", "CCONJ", "SCONJ", "AUX", "PART"}
-            if doc.has_annotation("DEP"):
-                for chunk in doc.noun_chunks:
-                    toks = [t for t in chunk
-                            if t.pos_ not in skip
-                            and t.text.lower() not in stopwords
-                            and len(t.text) > 1 and not t.is_stop]
-                    if toks:
-                        phrase = " ".join(t.text for t in toks).strip()
-                        if len(phrase) > 2:
-                            noun_phrases.append(phrase)
-            log.debug("Noun phrases: %d", len(noun_phrases))
-
-            _ui("Collecting tokens \u2026")
-            has_pos = doc.has_annotation("TAG") or doc.has_annotation("POS")
-            for token in doc:
-                txt = token.text.strip()
-                if not txt or len(txt) < 3:
-                    continue
-                if txt.lower() in stopwords or txt.lower() in excluded:
-                    continue
-                if token.like_num or token.like_email or token.like_url:
-                    continue
-                if all(c in string.punctuation for c in txt):
-                    continue
-                if has_pos:
-                    if token.pos_ not in ("NOUN", "PROPN", "ADJ"):
-                        continue
-                    if token.is_stop:
-                        continue
-                tech_tokens.append(txt)
-            log.debug("Tech tokens: %d", len(tech_tokens))
-
-        except Exception as exc:
-            log.error("spaCy pipeline failed: %s", exc, exc_info=True)
-            _ui(f"spaCy error: {exc} \u2014 YAKE only.")
-            model_name = f"YAKE-only ({type(exc).__name__})"
-            excluded, noun_phrases, tech_tokens = set(), [], []
-
+    # -- 5. YAKE keywords --
     _ui("Running YAKE \u2026")
     yake_results = yake_extract(resume_text, lang)
     log.info("YAKE returned %d candidates", len(yake_results))
 
+    # -- 6. Merge, weight, rank --
     _ui("Scoring terms \u2026")
-    has_spacy_data = bool(noun_phrases or tech_tokens)
-    log.info("Mode: %s", "spaCy + YAKE" if has_spacy_data else "YAKE-only")
+    all_terms = []
+    for phrase in noun_phrases:
+        c = clean_term(phrase, lang, separator)
+        if is_valid_term(c, excluded, stopwords):
+            all_terms.extend([c] * NOUN_PHRASE_MULTIPLIER)
+    for term, score in yake_results:
+        c = clean_term(term, lang, separator)
+        if is_valid_term(c, excluded, stopwords):
+            reps = max(1, min(YAKE_MULTIPLIER_CAP, int(6 / (score + 0.1))))
+            all_terms.extend([c] * reps)
+    for tok in tech_tokens:
+        c = clean_term(tok, lang, separator)
+        if is_valid_term(c, excluded, stopwords):
+            all_terms.extend([c] * TOKEN_MULTIPLIER)
+
+    counts = Counter(all_terms)
+    if not counts:
+        log.warning("No valid terms after filtering — returning fallback")
+        return {"Professional": 5000, "Skills": 5000}, {}, lang, model_name
+
+    mx = max(counts.values())
+    log_mx = math.log(mx + 1)
+    all_ranked = counts.most_common()
+
+    weighted = {}
+    for term, count in all_ranked[:MAX_TERMS]:
+        n = math.log(count + 1) / log_mx if log_mx > 0 else 1.0
+        weighted[term] = int(WEIGHT_MIN + (WEIGHT_MAX - WEIGHT_MIN) * n)
 
     runner_ups: dict[str, int] = {}
-
-    if has_spacy_data:
-        all_terms = []
-        for phrase in noun_phrases:
-            c = clean_term(phrase, lang, separator)
-            if is_valid_term(c, excluded, stopwords):
-                all_terms.extend([c] * NOUN_PHRASE_MULTIPLIER)
-        for term, score in yake_results:
-            c = clean_term(term, lang, separator)
-            if is_valid_term(c, excluded, stopwords):
-                reps = max(1, min(YAKE_MULTIPLIER_CAP, int(6 / (score + 0.1))))
-                all_terms.extend([c] * reps)
-        for tok in tech_tokens:
-            c = clean_term(tok, lang, separator)
-            if is_valid_term(c, excluded, stopwords):
-                all_terms.extend([c] * TOKEN_MULTIPLIER)
-
-        counts = Counter(all_terms)
-        if not counts:
-            log.warning("No valid terms after filtering — returning fallback")
-            return {"Professional": 5000, "Skills": 5000}, {}, lang, model_name
-
-        mx = max(counts.values())
-        log_mx = math.log(mx + 1)
-        all_ranked = counts.most_common()
-        weighted = {}
-        for term, count in all_ranked[:MAX_TERMS]:
-            n = math.log(count + 1) / log_mx if log_mx > 0 else 1.0
-            weighted[term] = int(WEIGHT_MIN + (WEIGHT_MAX - WEIGHT_MIN) * n)
-        # Runner-ups: next batch after the top MAX_TERMS.
-        for term, count in all_ranked[MAX_TERMS : MAX_TERMS + 30]:
-            n = math.log(count + 1) / log_mx if log_mx > 0 else 1.0
-            runner_ups[term] = int(WEIGHT_MIN + (WEIGHT_MAX - WEIGHT_MIN) * n)
-    else:
-        valid, seen = [], set()
-        for term, score in yake_results:
-            c = clean_term(term, lang, separator)
-            cl = c.lower()
-            if cl in seen:
-                continue
-            if is_valid_term(c, excluded, stopwords):
-                valid.append((c, score))
-                seen.add(cl)
-        if not valid:
-            log.warning("No valid YAKE terms after filtering — returning fallback")
-            return {"Professional": 5000, "Skills": 5000}, {}, lang, model_name
-
-        valid.sort(key=lambda x: x[1])
-        scores = [s for _, s in valid]
-        mn, mx_s = min(scores), max(scores)
-        rng = mx_s - mn
-        weighted = {}
-        for term, score in valid[:MAX_TERMS]:
-            norm = 1.0 - (score - mn) / rng if rng > 0 else 1.0
-            weighted[term] = int(WEIGHT_MIN + (WEIGHT_MAX - WEIGHT_MIN) * norm)
-        for term, score in valid[MAX_TERMS : MAX_TERMS + 30]:
-            norm = 1.0 - (score - mn) / rng if rng > 0 else 1.0
-            runner_ups[term] = int(WEIGHT_MIN + (WEIGHT_MAX - WEIGHT_MIN) * norm)
+    for term, count in all_ranked[MAX_TERMS : MAX_TERMS + 30]:
+        n = math.log(count + 1) / log_mx if log_mx > 0 else 1.0
+        runner_ups[term] = int(WEIGHT_MIN + (WEIGHT_MAX - WEIGHT_MIN) * n)
 
     log.info("Final terms: %d, runner-ups: %d", len(weighted), len(runner_ups))
     _ui(f"Done \u2014 {len(weighted)} terms.")
@@ -847,15 +921,16 @@ def generate_wordcloud(terms, background_color="white", colormap="turbo",
                 bbox_inches="tight", pad_inches=0)
     plt.close(fig)
 
-    quality = 95
-    while True:
-        img = Image.open(output_path)
-        img.save(output_path, format="png", optimize=True, quality=quality)
+    # PNG is lossless — the 'quality' param is ignored for PNG.
+    # If the file exceeds the limit, reduce colours (quantise).
+    img = Image.open(output_path)
+    fsize = os.path.getsize(output_path) / (1024 * 1024)
+    if fsize > MAX_FILE_SIZE_MB:
+        log.info("PNG too large (%.2f MB), quantising to 256 colours", fsize)
+        img = img.quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+        img.save(output_path, format="png", optimize=True)
         fsize = os.path.getsize(output_path) / (1024 * 1024)
-        if fsize <= MAX_FILE_SIZE_MB:
-            break
-        quality = max(10, quality - 5)
-    log.info("Saved: %s (%.2f MB, quality=%d)", output_path, fsize, quality)
+    log.info("Saved: %s (%.2f MB)", output_path, fsize)
     return output_path
 
 
@@ -863,20 +938,36 @@ def generate_wordcloud(terms, background_color="white", colormap="turbo",
 #                          TKINTER GUI                                   #
 # ===================================================================== #
 
-CLR_BG = "#f5f6fa"
-CLR_FRAME = "#ffffff"
-CLR_PRIMARY = "#2563eb"
-CLR_PRIMARY_HV = "#1d4ed8"
-CLR_DANGER = "#dc2626"
-CLR_DANGER_HV = "#b91c1c"
-CLR_SUCCESS = "#16a34a"
-CLR_SUCCESS_HV = "#15803d"
-CLR_TEXT = "#1e293b"
-CLR_TEXT_LIGHT = "#64748b"
+# -- High-contrast palette (tested on macOS, Linux, Windows) ------------
+CLR_BG = "#e8ecf1"            # main window background
+CLR_FRAME = "#ffffff"          # card/panel background
+CLR_PRIMARY = "#1d4ed8"        # blue — buttons, accents
+CLR_PRIMARY_HV = "#1e40af"     # blue hover
+CLR_DANGER = "#b91c1c"         # red — remove button
+CLR_DANGER_HV = "#991b1b"      # red hover
+CLR_SUCCESS = "#15803d"        # green — analyse / add
+CLR_SUCCESS_HV = "#166534"     # green hover
+CLR_TEXT = "#0f172a"           # near-black body text
+CLR_TEXT_LIGHT = "#475569"     # secondary text (status, hints)
+CLR_TREE_BG = "#ffffff"        # treeview background
+CLR_TREE_FG = "#0f172a"        # treeview text
+CLR_TREE_SEL = "#bfdbfe"       # treeview selection highlight
+CLR_TREE_HEAD_BG = "#cbd5e1"   # treeview header background
+CLR_TREE_HEAD_FG = "#0f172a"   # treeview header text
+
+# Cross-platform font — pick the first available.
+_FONT_FAMILY = "Segoe UI"     # Windows
+if sys.platform == "darwin":
+    _FONT_FAMILY = "Helvetica Neue"
+elif sys.platform.startswith("linux"):
+    _FONT_FAMILY = "DejaVu Sans"
 
 
 def _downloads_folder() -> Path:
-    """Return the user's Downloads folder (cross-platform)."""
+    """Return the best output folder: /data (Docker) → ~/Downloads → ~."""
+    docker_data = Path("/data")
+    if docker_data.is_dir():
+        return docker_data
     dl = Path.home() / "Downloads"
     if dl.is_dir():
         return dl
@@ -891,17 +982,24 @@ class WordCloudApp(tk.Tk):
         self.configure(bg=CLR_BG)
         self.minsize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
         self.update_idletasks()
-        w, h = WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT
-        x = (self.winfo_screenwidth() - w) // 2
-        y = (self.winfo_screenheight() - h) // 2
+        # Size to 80% of screen so all controls are visible on launch.
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w = max(WINDOW_MIN_WIDTH, int(sw * 0.80))
+        h = max(WINDOW_MIN_HEIGHT, int(sh * 0.85))
+        x = (sw - w) // 2
+        y = max(0, (sh - h) // 2 - 30)   # nudge up slightly for taskbar
         self.geometry(f"{w}x{h}+{x}+{y}")
 
         self.terms = {}
         self.runner_ups = {}
+        self.user_excluded = set()       # terms the user explicitly removed
+        self._lock = threading.Lock()    # guards terms/runner_ups/user_excluded
         self.detected_lang = "en"
         self.spacy_model = ""
         self.resume_text = ""
         self.preview_image = None
+        self._sort_col = "weight"          # current sort column
+        self._sort_reverse = True           # descending by default
         self.bg_var = tk.StringVar(value="white")
         self.palette_var = tk.StringVar(value="turbo")
         self.separator_var = tk.StringVar(value="_")
@@ -913,14 +1011,73 @@ class WordCloudApp(tk.Tk):
     def _build_ui(self):
         style = ttk.Style(self)
         style.theme_use("clam")
-        style.configure("Card.TLabelframe", background=CLR_FRAME, borderwidth=1, relief="solid")
-        style.configure("Card.TLabelframe.Label", background=CLR_FRAME, foreground=CLR_TEXT, font=("Segoe UI", 10, "bold"))
-        style.configure("TLabel", background=CLR_BG, foreground=CLR_TEXT, font=("Segoe UI", 10))
-        style.configure("Header.TLabel", background=CLR_BG, foreground=CLR_TEXT, font=("Segoe UI", 16, "bold"))
-        style.configure("Sub.TLabel", background=CLR_BG, foreground=CLR_TEXT_LIGHT, font=("Segoe UI", 9))
-        style.configure("Status.TLabel", background=CLR_BG, foreground=CLR_TEXT_LIGHT, font=("Segoe UI", 9, "italic"))
-        style.configure("TRadiobutton", background=CLR_FRAME)
-        style.configure("TCombobox", font=("Segoe UI", 10), padding=4)
+
+        # -- Global font shorthand --
+        _f = _FONT_FAMILY
+        _fn = (_f, 10)
+        _fb = (_f, 10, "bold")
+        _fs = (_f, 9)
+        _fsi = (_f, 9, "italic")
+        _fh = (_f, 16, "bold")
+
+        # -- Card frames --
+        style.configure("Card.TLabelframe",
+                        background=CLR_FRAME, borderwidth=1, relief="solid")
+        style.configure("Card.TLabelframe.Label",
+                        background=CLR_FRAME, foreground=CLR_TEXT, font=_fb)
+
+        # -- Labels --
+        style.configure("TLabel",
+                        background=CLR_BG, foreground=CLR_TEXT, font=_fn)
+        style.configure("Header.TLabel",
+                        background=CLR_BG, foreground=CLR_TEXT, font=_fh)
+        style.configure("Sub.TLabel",
+                        background=CLR_BG, foreground=CLR_TEXT_LIGHT, font=_fs)
+        style.configure("Status.TLabel",
+                        background=CLR_BG, foreground=CLR_TEXT_LIGHT, font=_fsi)
+
+        # -- Radio buttons --
+        style.configure("TRadiobutton",
+                        background=CLR_FRAME, foreground=CLR_TEXT, font=_fn)
+
+        # -- Combobox --
+        style.configure("TCombobox", font=_fn, padding=4)
+
+        # -- Entry --
+        style.configure("TEntry", font=_fn)
+
+        # -- Treeview (high contrast) --
+        style.configure("Treeview",
+                        background=CLR_TREE_BG,
+                        foreground=CLR_TREE_FG,
+                        fieldbackground=CLR_TREE_BG,
+                        font=_fn,
+                        rowheight=24)
+        style.configure("Treeview.Heading",
+                        background=CLR_TREE_HEAD_BG,
+                        foreground=CLR_TREE_HEAD_FG,
+                        font=_fb,
+                        relief="flat",
+                        padding=4)
+        style.map("Treeview.Heading",
+                  background=[("active", "#94a3b8")])
+        style.map("Treeview",
+                  background=[("selected", CLR_TREE_SEL)],
+                  foreground=[("selected", CLR_TREE_FG)])
+
+        # -- ttk.Button styles (work on macOS unlike tk.Button) --
+        for name, bg, bg_hv, fg in [
+            ("Primary.TButton", CLR_PRIMARY, CLR_PRIMARY_HV, "#ffffff"),
+            ("Success.TButton", CLR_SUCCESS, CLR_SUCCESS_HV, "#ffffff"),
+            ("Danger.TButton",  CLR_DANGER,  CLR_DANGER_HV,  "#ffffff"),
+        ]:
+            style.configure(name,
+                            background=bg, foreground=fg,
+                            font=(_f, 9, "bold"),
+                            padding=(14, 5), relief="flat", borderwidth=0)
+            style.map(name,
+                      background=[("active", bg_hv), ("pressed", bg_hv)],
+                      foreground=[("active", fg), ("pressed", fg)])
 
         outer = tk.Frame(self, bg=CLR_BG)
         outer.pack(fill="both", expand=True)
@@ -928,11 +1085,19 @@ class WordCloudApp(tk.Tk):
         sb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
         self.scroll_frame = tk.Frame(canvas, bg=CLR_BG)
         self.scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.scroll_frame, anchor="nw")
+        win_id = canvas.create_window((0, 0), window=self.scroll_frame, anchor="nw")
+        # Stretch inner frame to fill canvas width when window is resized.
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win_id, width=e.width))
         canvas.configure(yscrollcommand=sb.set)
         canvas.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
-        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+        # Cross-platform scroll: macOS sends delta in different units.
+        def _on_scroll(event):
+            if sys.platform == "darwin":
+                canvas.yview_scroll(-event.delta, "units")
+            else:
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_scroll)
 
         c = tk.Frame(self.scroll_frame, bg=CLR_BG)
         c.pack(fill="both", expand=True, padx=24, pady=12)
@@ -955,8 +1120,10 @@ class WordCloudApp(tk.Tk):
         lf = ttk.LabelFrame(c, text="  Extracted Terms  ", style="Card.TLabelframe")
         lf.pack(fill="both", expand=True, pady=(0, 8))
         cols = ("term", "weight", "bar")
-        self.tree = ttk.Treeview(lf, columns=cols, show="headings", height=10)
-        self.tree.heading("term", text="Term"); self.tree.heading("weight", text="Weight"); self.tree.heading("bar", text="Relative")
+        self.tree = ttk.Treeview(lf, columns=cols, show="headings", height=18)
+        self.tree.heading("term", text="Term ▽", command=lambda: self._sort_by("term"))
+        self.tree.heading("weight", text="▼ Weight", command=lambda: self._sort_by("weight"))
+        self.tree.heading("bar", text="Relative")
         self.tree.column("term", width=280, anchor="w"); self.tree.column("weight", width=80, anchor="e"); self.tree.column("bar", width=200, anchor="w")
         vsb = ttk.Scrollbar(lf, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -968,12 +1135,12 @@ class WordCloudApp(tk.Tk):
         ef.pack(fill="x", pady=(0, 8))
         # Row 0: Remove selected + Add term.
         self._btn(ef, "\u2212 Remove Selected", self._remove_selected, CLR_DANGER).grid(row=0, column=0, padx=(0, 16))
-        tk.Label(ef, text="Add term:", bg=CLR_BG, font=("Segoe UI", 10), fg=CLR_TEXT).grid(row=0, column=1, sticky="w", padx=(0, 6))
+        tk.Label(ef, text="Add term:", bg=CLR_BG, font=(_FONT_FAMILY, 10), fg=CLR_TEXT).grid(row=0, column=1, sticky="w", padx=(0, 6))
         self.add_entry = ttk.Entry(ef, width=26)
         self.add_entry.grid(row=0, column=2, padx=(0, 6))
         self._btn(ef, "+ Add", self._add_term, CLR_SUCCESS).grid(row=0, column=3)
         # Row 1: Runner-up promotion.
-        tk.Label(ef, text="Runner-ups:", bg=CLR_BG, font=("Segoe UI", 10), fg=CLR_TEXT).grid(row=1, column=0, sticky="w", padx=(0, 6), pady=(8, 0))
+        tk.Label(ef, text="Runner-ups:", bg=CLR_BG, font=(_FONT_FAMILY, 10), fg=CLR_TEXT).grid(row=1, column=0, sticky="w", padx=(0, 6), pady=(8, 0))
         self.runner_combo = ttk.Combobox(ef, state="readonly", width=30)
         self.runner_combo.grid(row=1, column=1, columnspan=2, sticky="w", padx=(0, 6), pady=(8, 0))
         self._btn(ef, "\u2191 Promote", self._promote_runner, CLR_PRIMARY).grid(row=1, column=3, pady=(8, 0))
@@ -985,10 +1152,10 @@ class WordCloudApp(tk.Tk):
         inner.pack(fill="x", padx=12, pady=8)
 
         # Row 0: Background + Palette.
-        tk.Label(inner, text="Background:", bg=CLR_FRAME, font=("Segoe UI", 10), fg=CLR_TEXT).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        tk.Label(inner, text="Background:", bg=CLR_FRAME, font=(_FONT_FAMILY, 10), fg=CLR_TEXT).grid(row=0, column=0, sticky="w", padx=(0, 8))
         ttk.Radiobutton(inner, text="Light", variable=self.bg_var, value="white").grid(row=0, column=1, padx=(0, 8))
         ttk.Radiobutton(inner, text="Dark", variable=self.bg_var, value="black").grid(row=0, column=2, padx=(0, 24))
-        tk.Label(inner, text="Palette:", bg=CLR_FRAME, font=("Segoe UI", 10), fg=CLR_TEXT).grid(row=0, column=3, sticky="w", padx=(0, 8))
+        tk.Label(inner, text="Palette:", bg=CLR_FRAME, font=(_FONT_FAMILY, 10), fg=CLR_TEXT).grid(row=0, column=3, sticky="w", padx=(0, 8))
         pals = ["turbo \u2014 Vibrant", "gray \u2014 Mono", "ocean \u2014 Ocean", "hot \u2014 Hot",
                 "rainbow \u2014 Rainbow", "viridis \u2014 Viridis", "plasma \u2014 Plasma", "inferno \u2014 Inferno"]
         combo_pal = ttk.Combobox(inner, values=pals, state="readonly", width=20)
@@ -997,11 +1164,11 @@ class WordCloudApp(tk.Tk):
         combo_pal.bind("<<ComboboxSelected>>", lambda e: self.palette_var.set(combo_pal.get().split(" \u2014 ")[0].strip()))
 
         # Row 1: Separator + Language.
-        tk.Label(inner, text="Separator:", bg=CLR_FRAME, font=("Segoe UI", 10), fg=CLR_TEXT).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+        tk.Label(inner, text="Separator:", bg=CLR_FRAME, font=(_FONT_FAMILY, 10), fg=CLR_TEXT).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
         ttk.Radiobutton(inner, text="Underscore (Data_Science)", variable=self.separator_var, value="_").grid(row=1, column=1, columnspan=2, sticky="w", padx=(0, 8), pady=(8, 0))
         ttk.Radiobutton(inner, text="Space (Data Science)", variable=self.separator_var, value=" ").grid(row=1, column=3, sticky="w", padx=(0, 24), pady=(8, 0))
 
-        tk.Label(inner, text="Language:", bg=CLR_FRAME, font=("Segoe UI", 10), fg=CLR_TEXT).grid(row=1, column=4, sticky="e", padx=(16, 8), pady=(8, 0))
+        tk.Label(inner, text="Language:", bg=CLR_FRAME, font=(_FONT_FAMILY, 10), fg=CLR_TEXT).grid(row=1, column=4, sticky="e", padx=(16, 8), pady=(8, 0))
         langs = [
             "auto \u2014 Detect automatically",
             "en \u2014 English", "es \u2014 Espa\u00f1ol", "fr \u2014 Fran\u00e7ais",
@@ -1030,26 +1197,29 @@ class WordCloudApp(tk.Tk):
         # Preview.
         pf = ttk.LabelFrame(c, text="  Preview  ", style="Card.TLabelframe")
         pf.pack(fill="both", expand=True, pady=(0, 16))
-        self.preview_label = tk.Label(pf, bg=CLR_FRAME, text="Word cloud will appear here.", fg=CLR_TEXT_LIGHT, font=("Segoe UI", 10, "italic"))
+        self.preview_label = tk.Label(pf, bg=CLR_FRAME, text="Word cloud will appear here.", fg=CLR_TEXT_LIGHT, font=(_FONT_FAMILY, 10, "italic"))
         self.preview_label.pack(fill="both", expand=True, padx=8, pady=8)
 
     @staticmethod
     def _btn(parent, text, command, colour, width=None):
-        hover = {CLR_PRIMARY: CLR_PRIMARY_HV, CLR_DANGER: CLR_DANGER_HV, CLR_SUCCESS: CLR_SUCCESS_HV}.get(colour, colour)
-        kw = dict(text=text, command=command, bg=colour, fg="white", font=("Segoe UI", 9, "bold"),
-                  relief="flat", cursor="hand2", padx=14, pady=5, bd=0, activebackground=hover, activeforeground="white")
+        """Create a ttk.Button with the matching colour style."""
+        style_map = {
+            CLR_PRIMARY: "Primary.TButton",
+            CLR_DANGER:  "Danger.TButton",
+            CLR_SUCCESS: "Success.TButton",
+        }
+        sty = style_map.get(colour, "Primary.TButton")
+        kw = dict(text=text, command=command, style=sty, cursor="hand2")
         if width:
             kw["width"] = width
-        btn = tk.Button(parent, **kw)
-        btn.bind("<Enter>", lambda e: btn.config(bg=hover))
-        btn.bind("<Leave>", lambda e: btn.config(bg=colour))
-        return btn
+        return ttk.Button(parent, **kw)
 
     # -- Actions --
 
     def _browse_file(self):
         path = filedialog.askopenfilename(
             title="Select Resume / CV",
+            initialdir=str(_downloads_folder()),
             filetypes=[("All supported", "*.pdf *.docx *.txt"), ("PDF", "*.pdf"), ("Word", "*.docx"), ("Text", "*.txt")])
         if path:
             self.file_var.set(path)
@@ -1064,9 +1234,38 @@ class WordCloudApp(tk.Tk):
         if not self.terms:
             return
         mx = max(self.terms.values())
-        for t, w in sorted(self.terms.items(), key=lambda x: x[1], reverse=True):
+        # Sort according to current sort state.
+        if self._sort_col == "term":
+            ordered = sorted(self.terms.items(),
+                             key=lambda x: x[0].lower(),
+                             reverse=self._sort_reverse)
+        else:  # weight
+            ordered = sorted(self.terms.items(),
+                             key=lambda x: x[1],
+                             reverse=self._sort_reverse)
+        for t, w in ordered:
             bar = "\u2588" * (int((w / mx) * 20) if mx else 0)
             self.tree.insert("", "end", values=(t, w, bar))
+
+    def _sort_by(self, col):
+        """Toggle sort column/direction and update heading indicators."""
+        if self._sort_col == col:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_col = col
+            self._sort_reverse = col == "weight"   # weight defaults desc, term defaults asc
+        # Update heading text with arrow indicators.
+        arrow_dn, arrow_up = "\u25bc", "\u25b2"   # ▼ ▲
+        no_arrow = "\u25bd"                        # ▽ (inactive)
+        if self._sort_col == "term":
+            t_arrow = arrow_dn if self._sort_reverse else arrow_up
+            self.tree.heading("term", text=f"{t_arrow} Term")
+            self.tree.heading("weight", text=f"Weight {no_arrow}")
+        else:
+            w_arrow = arrow_dn if self._sort_reverse else arrow_up
+            self.tree.heading("term", text=f"Term {no_arrow}")
+            self.tree.heading("weight", text=f"{w_arrow} Weight")
+        self._populate_tree()
 
     def _run_extraction(self):
         path = self.file_var.get()
@@ -1112,7 +1311,9 @@ class WordCloudApp(tk.Tk):
                     lang_override=None if lang_choice == "auto" else lang_choice,
                     separator=sep,
                 )
-                self.terms, self.runner_ups = terms, runner_ups
+                with self._lock:
+                    self.terms, self.runner_ups = terms, runner_ups
+                    self.user_excluded = set()  # fresh extraction → reset
                 self.detected_lang, self.spacy_model = lang, model
                 self.after(0, self._populate_tree)
                 self.after(0, self._populate_runners)
@@ -1139,27 +1340,41 @@ class WordCloudApp(tk.Tk):
         raw = self.add_entry.get().strip()
         if not raw: return
         sep = self.separator_var.get()
-        for p in raw.split(","):
-            c = clean_term(p.strip(), self.detected_lang, sep)
-            if c:
-                self.terms[c] = MANUAL_ADD_WEIGHT
-                log.debug("Manual add: '%s' (weight=%d)", c, MANUAL_ADD_WEIGHT)
+        with self._lock:
+            for p in raw.split(","):
+                c = clean_term(p.strip(), self.detected_lang, sep)
+                if c:
+                    self.terms[c] = MANUAL_ADD_WEIGHT
+                    self.user_excluded.discard(c)
+                    log.debug("Manual add: '%s' (weight=%d)", c, MANUAL_ADD_WEIGHT)
         self.add_entry.delete(0, "end")
         self._populate_tree()
 
     def _remove_selected(self):
-        """Remove whatever rows are highlighted in the treeview."""
+        """Remove highlighted rows; auto-backfill from runner-ups."""
         sel = self.tree.selection()
         if not sel:
             messagebox.showinfo("Nothing selected", "Click a term in the table first.")
             return
-        for iid in sel:
-            term = self.tree.item(iid, "values")[0]
-            # Move removed term to runner-ups so user can re-promote.
-            weight = self.terms.pop(term, None)
-            if weight is not None:
-                self.runner_ups[term] = weight
-                log.debug("Removed → runner-ups: '%s'", term)
+        with self._lock:
+            for iid in sel:
+                term = self.tree.item(iid, "values")[0]
+                self.terms.pop(term, None)
+                self.user_excluded.add(term)
+                log.debug("Removed → excluded: '%s'", term)
+
+            # Auto-backfill: pull top runner-ups to keep count at MAX_TERMS.
+            while len(self.terms) < MAX_TERMS and self.runner_ups:
+                # Find highest-weight runner-up not in user_excluded.
+                best_term, best_w = None, -1
+                for t, w in self.runner_ups.items():
+                    if t not in self.user_excluded and w > best_w:
+                        best_term, best_w = t, w
+                if best_term is None:
+                    break
+                self.terms[best_term] = best_w
+                del self.runner_ups[best_term]
+                log.debug("Auto-backfilled: '%s' (%d)", best_term, best_w)
         self._populate_tree()
         self._populate_runners()
 
@@ -1174,16 +1389,19 @@ class WordCloudApp(tk.Tk):
             term, weight = match.group(1), int(match.group(2))
         else:
             term, weight = sel, MANUAL_ADD_WEIGHT
-        self.terms[term] = weight
-        self.runner_ups.pop(term, None)
+        with self._lock:
+            self.terms[term] = weight
+            self.runner_ups.pop(term, None)
+            self.user_excluded.discard(term)   # un-exclude if re-promoted
         log.debug("Promoted runner-up: '%s' (%d)", term, weight)
         self._populate_tree()
         self._populate_runners()
 
     def _populate_runners(self):
-        """Refresh the runner-up combobox."""
+        """Refresh the runner-up combobox, excluding user-removed terms."""
         items = [f"{t} ({w})" for t, w in
-                 sorted(self.runner_ups.items(), key=lambda x: x[1], reverse=True)]
+                 sorted(self.runner_ups.items(), key=lambda x: x[1], reverse=True)
+                 if t not in self.user_excluded]
         self.runner_combo["values"] = items
         if items:
             self.runner_combo.current(0)
@@ -1242,9 +1460,24 @@ class WordCloudApp(tk.Tk):
             initialdir=str(_downloads_folder()))
         if dest:
             with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(f"# Main Terms ({len(self.terms)})\n")
                 for t, w in sorted(self.terms.items(), key=lambda x: x[1], reverse=True):
                     fh.write(f"{t}\t{w}\n")
-            log.info("Exported %d terms to: %s", len(self.terms), dest)
+                # Include runner-ups (excluding user-removed terms).
+                visible = {t: w for t, w in self.runner_ups.items()
+                           if t not in self.user_excluded}
+                if visible:
+                    fh.write(f"\n# Runner-Ups ({len(visible)})\n")
+                    for t, w in sorted(visible.items(), key=lambda x: x[1], reverse=True):
+                        fh.write(f"{t}\t{w}\n")
+                # Note excluded terms if any.
+                if self.user_excluded:
+                    fh.write(f"\n# Excluded ({len(self.user_excluded)})\n")
+                    for t in sorted(self.user_excluded):
+                        fh.write(f"{t}\n")
+            total = len(self.terms) + len(visible)
+            log.info("Exported %d terms + %d runner-ups to: %s",
+                     len(self.terms), len(visible), dest)
             self._set_status(f"Exported to: {dest}")
 
 
