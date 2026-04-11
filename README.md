@@ -1,4 +1,4 @@
-# LinkedIn Banner Word Cloud Generator
+# linkedin-banner-wordcloud-generator
 
 A Python application that reads your resume (PDF, DOCX, or TXT), extracts professional terms using NLP, and generates a word cloud sized for LinkedIn banners (1584×396 pixels). Supports 18 languages with automatic language detection.
 

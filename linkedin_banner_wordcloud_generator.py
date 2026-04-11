@@ -169,7 +169,7 @@ def _load_exclusions() -> dict:
     return {}
 
 
-_EX = _load_exclusions()
+_exclusions = _load_exclusions()
 
 
 def _lang_dict_to_sets(raw: dict) -> dict[str, set[str]]:
@@ -191,15 +191,15 @@ def _extract_terms_list(raw) -> frozenset[str]:
     return frozenset()
 
 
-SECTION_HEADERS = _lang_dict_to_sets(_EX.get("section_headers", {}))
+SECTION_HEADERS = _lang_dict_to_sets(_exclusions.get("section_headers", {}))
 ACTION_VERBS_AND_FILLER = _lang_dict_to_sets(
-    _EX.get("action_verbs_and_filler", {}),
+    _exclusions.get("action_verbs_and_filler", {}),
 )
-DEGREE_TERMS = _lang_dict_to_sets(_EX.get("degree_terms", {}))
-DATE_TERMS = _lang_dict_to_sets(_EX.get("date_terms", {}))
-RESUME_METADATA = _lang_dict_to_sets(_EX.get("resume_metadata", {}))
-BANNED_SUBSTRINGS = _lang_dict_to_sets(_EX.get("banned_substrings", {}))
-NEVER_ALONE = _lang_dict_to_sets(_EX.get("never_alone", {}))
+DEGREE_TERMS = _lang_dict_to_sets(_exclusions.get("degree_terms", {}))
+DATE_TERMS = _lang_dict_to_sets(_exclusions.get("date_terms", {}))
+RESUME_METADATA = _lang_dict_to_sets(_exclusions.get("resume_metadata", {}))
+BANNED_SUBSTRINGS = _lang_dict_to_sets(_exclusions.get("banned_substrings", {}))
+NEVER_ALONE = _lang_dict_to_sets(_exclusions.get("never_alone", {}))
 
 
 def _merge_lang(source: dict[str, set[str]], lang: str) -> set[str]:
