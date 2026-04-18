@@ -1,37 +1,59 @@
-# !! MUST come before ANY third-party import — confection triggers the
-# !! warning the instant it is imported (even as a transitive dependency).
-import warnings                                          # noqa: E402
-warnings.filterwarnings(
-    "ignore",
-    message=r".*Pydantic V1.*not compatible.*",
-    category=UserWarning,
-)
-warnings.filterwarnings(
-    "ignore",
-    message=r".*unable to infer type.*",
-    category=UserWarning,
-)
+"""LinkedIn Banner Word Cloud Generator.
+
+Reads a resume (PDF, DOCX, or TXT), sends the text to an AI provider to
+extract professional terms with importance weights, then renders a word cloud
+sized for LinkedIn banners (1584 × 396 px).
+
+Supported AI providers: Claude, ChatGPT, Gemini, Mistral, Groq.
+API keys are stored locally at ~/.wordcloud_generator/config.json.
+The UI theme follows the OS dark/light mode automatically.
+
+Dependencies (install once)::
+
+    pip install wordcloud matplotlib Pillow pdfplumber python-docx darkdetect
+
+Plus whichever AI provider you want to use::
+
+    pip install anthropic       # Claude
+    pip install openai          # ChatGPT
+    pip install google-genai    # Gemini
+    pip install mistralai       # Mistral
+    pip install groq            # Groq
+"""
+from __future__ import annotations  # lazy type-hint evaluation — Python 3.9+
 
 # ---------------------------------------------------------------------------
-# Imports
+# Standard-library imports (all before third-party)
 # ---------------------------------------------------------------------------
 import json
 import logging
-import math
 import os
 import random
 import re
+import shutil
 import string
 import sys
+import tempfile
 import threading
 import tkinter as tk
-import unicodedata
-from collections import Counter
+import warnings
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 # ---------------------------------------------------------------------------
-# Logging
+# Suppress noisy-but-harmless warnings before any third-party import
+# ---------------------------------------------------------------------------
+# pdfminer logs FontBBox problems through the *logging* module, not warnings.
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
+# Pillow / matplotlib can emit DeprecationWarnings about escape sequences.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*invalid escape sequence.*",
+    category=DeprecationWarning,
+)
+
+# ---------------------------------------------------------------------------
+# Application logging
 # ---------------------------------------------------------------------------
 LOG_DIR = Path.home() / ".wordcloud_generator"
 LOG_DIR.mkdir(exist_ok=True)
@@ -46,873 +68,706 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout),
     ],
 )
-# Keep console quiet — only warnings and errors.
+# Keep the console handler quiet — only warnings and errors.
 logging.getLogger().handlers[1].setLevel(logging.WARNING)
 log = logging.getLogger("wordcloud")
-log.info("="*60)
+log.info("=" * 60)
 log.info("LinkedIn Banner Word Cloud Generator — starting up")
 log.info("Python %s on %s", sys.version, sys.platform)
 
 
 # ---------------------------------------------------------------------------
-# Auto-install — installs missing packages on first run, then continues.
+# Auto-install missing third-party packages
 # ---------------------------------------------------------------------------
-def _auto_install():
-    """Check for missing packages and install them automatically."""
-    import subprocess
-    # Map: import name → pip package name
-    deps = {
-        "spacy": "spacy",
-        "yake": "yake",
-        "langdetect": "langdetect",
-        "wordcloud": "wordcloud",
+def _auto_install() -> None:
+    """Check for missing packages and install them automatically.
+
+    Tries a plain ``pip install`` first, then falls back to
+    ``--break-system-packages`` (needed on Python 3.12+ Debian/Ubuntu/Fedora)
+    and finally ``--user`` as a last resort.
+    """
+    import subprocess  # imported here to avoid polluting the module namespace
+
+    deps: dict[str, str] = {
+        "wordcloud":  "wordcloud",
         "matplotlib": "matplotlib",
-        "PIL": "Pillow",
+        "PIL":        "Pillow",
         "pdfplumber": "pdfplumber",
-        "docx": "python-docx",
+        "docx":       "python-docx",
+        "darkdetect": "darkdetect",
     }
-    missing = []
-    for mod, pip_name in deps.items():
+    missing = [
+        pip_name
+        for mod, pip_name in deps.items()
+        if not _can_import(mod)
+    ]
+    if not missing:
+        return
+
+    print(f"\n  Installing {len(missing)} missing package(s): {', '.join(missing)}")
+    print("  (one-time setup — may take a moment)\n")
+
+    base = [sys.executable, "-m", "pip", "install", "--quiet"]
+    for extra in [[], ["--break-system-packages"], ["--user"]]:
         try:
-            __import__(mod)
-        except ImportError:
-            missing.append(pip_name)
+            subprocess.check_call(base + extra + missing)
+            print()
+            return
+        except subprocess.CalledProcessError:
+            continue
 
-    if missing:
-        print(f"\n  Installing {len(missing)} missing package(s): {', '.join(missing)}")
-        print("  (one-time setup, may take a minute)\n")
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--quiet"] + missing
-        )
-        print()
+    print(
+        f"\n  Auto-install failed. Please run manually:\n"
+        f"  pip install {' '.join(missing)}\n"
+    )
+    sys.exit(1)
 
-    # Ensure at least one spaCy model is downloaded.
+
+def _can_import(module_name: str) -> bool:
+    """Return True if *module_name* can be imported without error."""
     try:
-        import spacy
-        spacy.load("en_core_web_sm")
-    except Exception:
-        print("  Downloading spaCy English model (one-time) ...")
-        subprocess.check_call(
-            [sys.executable, "-m", "spacy", "download", "en_core_web_sm", "--quiet"]
-        )
-        print()
+        __import__(module_name)
+        return True
+    except ImportError:
+        return False
+
 
 _auto_install()
 
-import spacy                             # noqa: E402
-import matplotlib                        # noqa: E402
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt          # noqa: E402
-from PIL import Image, ImageTk           # noqa: E402
-from wordcloud import WordCloud          # noqa: E402
-log.info("spaCy version %s", spacy.__version__)
+# Third-party imports — must come after _auto_install().
+import matplotlib                   # noqa: E402
+matplotlib.use("Agg")               # non-interactive backend, safe for threads
+import matplotlib.pyplot as plt     # noqa: E402
+from PIL import Image, ImageTk      # noqa: E402
+from wordcloud import WordCloud     # noqa: E402
+
+from providers import PROVIDERS, get_provider  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Constants
+# OS dark-mode detection
 # ---------------------------------------------------------------------------
-BANNER_WIDTH = 1584
-BANNER_HEIGHT = 396
-MAX_FILE_SIZE_MB = 3.0
-MAX_TERMS = 60
-WEIGHT_MIN = 1000
-WEIGHT_MAX = 10000
-NOUN_PHRASE_MULTIPLIER = 3
-YAKE_MULTIPLIER_CAP = 8
-TOKEN_MULTIPLIER = 1
-MANUAL_ADD_WEIGHT = 7000
-WINDOW_MIN_WIDTH = 1060
-WINDOW_MIN_HEIGHT = 860
+def _detect_dark_mode() -> bool:
+    """Return ``True`` if the OS is running in dark mode.
 
-FILLER_PATTERNS = [
-    re.compile(r"^\d+$"),
-    re.compile(r"^[\d\-\(\)\+\s\.]+$"),
-    re.compile(r"^[a-zA-Z0-9._%+-]+@"),
-    re.compile(r"^https?://"),
-    re.compile(r"^www\."),
-]
+    Tries ``darkdetect`` first (cross-platform), then falls back to
+    platform-specific queries for macOS and Windows.
+    """
+    try:
+        import darkdetect
+        return bool(darkdetect.isDark())
+    except Exception:
+        pass
 
-PRESERVE_UPPER = frozenset({
-    "SQL", "AWS", "API", "CSS", "HTML", "XML", "JSON", "REST", "GPU",
-    "CPU", "NLP", "AI", "ML", "ETL", "KPI", "ROI", "CRM", "ERP",
-    "SaaS", "IaaS", "PaaS", "CI", "CD", "GCP", "VBA", "DAX", "RPA",
-    "OCR", "NER", "LLM", "DNS", "TCP", "UDP", "HTTP", "SSH", "VPN",
-    "IAM", "SDK", "IDE", "ORM", "NoSQL", "GIS", "BI", "DBA", "QA",
-    "UX", "UI", "PM", "PMP", "CPA", "CFA", "MBA", "PhD", "MSc",
-    "BSc", "GAAP", "IFRS", "SOX", "HIPAA", "FERPA", "GDPR", "CCPA",
-    "SPSS", "SAS", "MATLAB", "R",
-})
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["defaults", "read", "-g", "AppleInterfaceStyle"],
+                capture_output=True,
+                text=True,
+            )
+            return result.stdout.strip().lower() == "dark"
+        except Exception:
+            pass
+
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            )
+            val, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            return val == 0
+        except Exception:
+            pass
+
+    return False
+
+
+_DARK = _detect_dark_mode()
+log.info("Theme: %s", "dark" if _DARK else "light")
+
+# ---------------------------------------------------------------------------
+# Colour themes
+# ---------------------------------------------------------------------------
+_THEMES: dict[str, dict[str, str]] = {
+    "light": dict(
+        bg           = "#e8ecf1",
+        frame        = "#ffffff",
+        primary      = "#1d4ed8",
+        primary_hv   = "#1e40af",
+        danger       = "#b91c1c",
+        danger_hv    = "#991b1b",
+        success      = "#15803d",
+        success_hv   = "#166534",
+        text         = "#0f172a",
+        text_light   = "#475569",
+        tree_bg      = "#ffffff",
+        tree_fg      = "#0f172a",
+        tree_sel     = "#bfdbfe",
+        tree_head_bg = "#cbd5e1",
+        tree_head_fg = "#0f172a",
+        entry_bg     = "#ffffff",
+        border       = "#cbd5e1",
+    ),
+    "dark": dict(
+        bg           = "#0f172a",
+        frame        = "#1e293b",
+        primary      = "#3b82f6",
+        primary_hv   = "#2563eb",
+        danger       = "#ef4444",
+        danger_hv    = "#dc2626",
+        success      = "#22c55e",
+        success_hv   = "#16a34a",
+        text         = "#f1f5f9",
+        text_light   = "#94a3b8",
+        tree_bg      = "#1e293b",
+        tree_fg      = "#f1f5f9",
+        tree_sel     = "#1e3a5f",
+        tree_head_bg = "#0f172a",
+        tree_head_fg = "#94a3b8",
+        entry_bg     = "#1e293b",
+        border       = "#334155",
+    ),
+}
+
+#: Active colour palette — every widget references ``C["key"]``.
+C: dict[str, str] = _THEMES["dark" if _DARK else "light"]
 
 
 # ---------------------------------------------------------------------------
-# Load exclusion lists from JSON
+# Application constants
 # ---------------------------------------------------------------------------
+BANNER_WIDTH: int   = 1584       # LinkedIn banner width in pixels
+BANNER_HEIGHT: int  = 396        # LinkedIn banner height in pixels
+MAX_FILE_SIZE_MB: float = 3.0    # PNG size cap; exceeded → colour-quantise
+MAX_TERMS: int      = 60         # Maximum terms shown in the treeview
+WEIGHT_MIN: int     = 1_000      # Minimum term weight passed to the AI
+WEIGHT_MAX: int     = 10_000     # Maximum term weight passed to the AI
+MANUAL_ADD_WEIGHT: int = 7_000   # Default weight for user-added terms
+MAX_RESUME_CHARS: int = 15_000   # Resume text truncation limit for API calls
 
-def _load_exclusions() -> dict:
-    """Load exclusion lists from ``exclusions.json``."""
-    candidates = [
-        Path(__file__).resolve().parent / "exclusions.json",
-        Path.cwd() / "exclusions.json",
-    ]
-    for p in candidates:
-        if p.is_file():
-            with open(p, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            log.info("Loaded exclusions.json from %s (%d keys)", p, len(data))
-            return data
+WINDOW_MIN_WIDTH: int  = 1060
+WINDOW_MIN_HEIGHT: int = 720
 
-    log.warning("exclusions.json not found — checked %s", candidates)
-    print(
-        "WARNING: exclusions.json not found.  "
-        "Place it next to this script for best results."
+
+# ---------------------------------------------------------------------------
+# Config helpers
+# ---------------------------------------------------------------------------
+CONFIG_FILE: Path = LOG_DIR / "config.json"
+
+
+def load_config() -> dict:
+    """Load the application config from disk.
+
+    Returns a default structure if the file does not exist or is corrupt.
+    """
+    if not CONFIG_FILE.exists():
+        return {"active_provider": "", "keys": {}}
+    try:
+        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"active_provider": "", "keys": {}}
+
+
+def save_config(config: dict) -> None:
+    """Persist *config* to disk as pretty-printed JSON."""
+    CONFIG_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# AI term-extraction prompt
+# ---------------------------------------------------------------------------
+TERM_EXTRACTION_PROMPT: str = """\
+You are an expert resume analyst with deep knowledge across all professional \
+fields — technology, finance, healthcare, law, education, marketing, \
+engineering, science, creative industries, government, non-profit, and more.
+
+Your task: read the resume below, identify the person's industry and role, \
+then extract the terms that best represent their professional identity for a \
+LinkedIn banner word cloud.
+
+Return ONLY a JSON object — no markdown fences, no preamble, no explanation. \
+Your entire response must be valid JSON and nothing else.
+
+{{
+  "terms": [
+    {{"term": "Term One", "weight": 9500}},
+    {{"term": "Term Two", "weight": 7800}},
+    ...up to 60 entries...
+  ],
+  "runner_ups": [
+    {{"term": "Term Three", "weight": 4200}},
+    ...up to 30 entries...
+  ]
+}}
+
+━━━  WHAT TO EXTRACT  ━━━
+
+Extract whichever of the following are relevant to THIS person's field. \
+Do not force tech terms onto a non-tech resume, or medical terms onto a \
+marketing resume. Let the resume guide you.
+
+• Hard skills — tools, software, platforms, instruments, techniques, methods \
+  (examples across industries: Excel, Photoshop, AutoCAD, R, QuickBooks, \
+  Salesforce, Pro Tools, SPSS, LexisNexis, Epic, MATLAB, Final Cut Pro)
+• Domain expertise — areas of specialization, practice areas, subject matter \
+  (examples: Contract Law, Oncology, Brand Strategy, Structural Engineering, \
+  Financial Modeling, Curriculum Design, Clinical Trials, Supply Chain)
+• Methodologies and frameworks — how the person works \
+  (examples: Agile, Six Sigma, Design Thinking, Lean, Scrum, \
+  Case Management, Evidence-Based Practice, Montessori, Value Investing)
+• Industry credentials and standards — certifications, protocols, regulations \
+  (examples: CPA, PMP, SHRM, Bar Admission, HIPAA, GAAP, ISO 9001, \
+  Series 7, LEED, AWS Certified, Google Analytics, Cisco CCNA)
+• Professional concepts — ideas and practices central to their work \
+  (examples: Patient Advocacy, Risk Assessment, Stakeholder Engagement, \
+  Fiscal Policy, Grant Writing, UX Research, Conflict Resolution)
+
+━━━  WEIGHTING GUIDE  ━━━
+
+Weight reflects how central a skill is to the person's professional identity \
+— not just how often it appears.
+
+  9000–10000  Signature skills: what this person IS known for. The things \
+              that would appear in their headline or elevator pitch. \
+              These should be few (3–8 terms).
+  7000–8999   Core competencies: used regularly, clearly demonstrated with \
+              results, central to their day-to-day role.
+  5000–6999   Strong supporting skills: mentioned with specifics, part of \
+              their toolkit but not the headline.
+  3000–4999   Relevant but secondary: present and genuine, adds breadth.
+  1000–2999   Peripheral: briefly mentioned, supporting context.
+
+Calibrate weights relative to each other. If this is a software engineer, \
+their primary language might be 9500. If this is a surgeon, their specialty \
+might be 9800. If this is a marketer, their channel expertise might be 9200.
+
+━━━  COMPOUND TERMS  ━━━
+
+- Each term is 1 or 2 words maximum.
+- Prefer specific compound terms over vague single words: \
+  "Financial Modeling" beats "Finance", "Patient Care" beats "Care", \
+  "Machine Learning" beats "Learning", "Contract Law" beats "Law".
+- If you include a compound term, do NOT also list its bare components \
+  as separate entries. "Power BI" covers "Power" and "BI" — do not list \
+  them separately. Only list a component alone if it carries independent \
+  meaning beyond any compound (e.g. "Python" is valid alongside "Python GUI").
+
+━━━  CASING  ━━━
+
+Use each term's real-world official casing — not blind title-case:
+• All-caps for initialisms and acronyms: SQL, API, CPA, MBA, HIPAA, \
+  GAAP, UX, AI, ML, ROI, KPI, EHR, CAD, SEO, PR, HR, CFO, NGO, etc.
+• Brand/product casing: PowerPoint, QuickBooks, LinkedIn, SharePoint, \
+  macOS, iOS, GitHub, ChatGPT, Salesforce, HubSpot, WordPress, etc.
+• Lowercase brands that style themselves lowercase: pandas, numpy, npm, \
+  dbt, pytest, etc.
+• Title Case for multi-word domain terms and professional concepts: \
+  Financial Modeling, Patient Care, Brand Strategy, Risk Management, etc.
+
+━━━  EXCLUDE  ━━━
+
+• Personal info: name, city, state, country, email, phone, URLs, \
+  social handles
+• Section headings: Education, Experience, Skills, Summary, References, etc.
+• Action verbs: Managed, Led, Developed, Created, Improved, Responsible, etc.
+• Degree terms: Bachelor, Master, PhD, MBA, Associate, Diploma, etc.
+• Dates, years, month names, time ranges
+• Generic filler: Various, Multiple, Several, Other, General, Extensive, etc.
+• Unsupported soft skills: "Team Player", "Hard Worker", "Detail Oriented" \
+  — unless the resume demonstrates them through specific achievements
+
+━━━  runner_ups  ━━━
+
+"runner_ups" are genuine skills from the resume that didn't make the \
+top 60 — not invented terms. They must appear in the actual document.
+
+Resume:
+{resume_text}
+"""
+
+
+# ---------------------------------------------------------------------------
+# NLP / AI helpers
+# ---------------------------------------------------------------------------
+def _detect_lang_simple(text: str) -> str:
+    """Return a BCP-47-style language code based on script frequency.
+
+    Only used for selecting a system font for the word cloud — full
+    language detection is handled by the AI prompt itself.
+
+    Returns ``"ja"``, ``"ko"``, ``"zh-cn"``, or ``"en"`` (default).
+    """
+    if not text:
+        return "en"
+    chars = len(text)
+    cjk    = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+    kana   = sum(1 for c in text if "\u3040" <= c <= "\u30ff")
+    hangul = sum(1 for c in text if "\uac00" <= c <= "\ud7af")
+    if kana   / chars > 0.03:
+        return "ja"
+    if hangul / chars > 0.03:
+        return "ko"
+    if cjk    / chars > 0.05:
+        return "zh-cn"
+    return "en"
+
+
+def extract_terms_ai(
+    resume_text: str,
+    provider,
+    separator: str = "_",
+    progress_callback=None,
+) -> tuple[dict[str, int], dict[str, int], str, str]:
+    """Send *resume_text* to *provider* and return weighted professional terms.
+
+    Args:
+        resume_text:       Raw text extracted from the resume file.
+        provider:          An initialised ``BaseProvider`` instance.
+        separator:         ``"_"`` or ``" "`` — joined between words in
+                           multi-word terms for display.
+        progress_callback: Optional ``callable(str)`` for status updates.
+
+    Returns:
+        A 4-tuple of ``(terms, runner_ups, lang, provider_name)`` where
+        *terms* and *runner_ups* are ``{term: weight}`` dicts.
+    """
+    def _ui(msg: str) -> None:
+        if progress_callback:
+            progress_callback(msg)
+
+    truncated = resume_text[:MAX_RESUME_CHARS]
+    if len(resume_text) > MAX_RESUME_CHARS:
+        log.info(
+            "Resume truncated from %d to %d chars for API call",
+            len(resume_text), MAX_RESUME_CHARS,
+        )
+
+    prompt = TERM_EXTRACTION_PROMPT.format(resume_text=truncated)
+    _ui(f"Sending to {provider.name} \u2026")
+    log.info(
+        "extract_terms_ai: %d chars, provider=%s, model=%s",
+        len(truncated), provider.name, provider.model,
     )
-    return {}
+
+    raw = provider.explain(prompt)
+    log.info("AI response: %d chars", len(raw))
+    _ui("Parsing response \u2026")
+
+    # Strip markdown fences if the model wrapped its JSON response anyway.
+    clean = raw.strip()
+    if clean.startswith("```"):
+        clean = re.sub(r"^```[a-zA-Z]*\n?", "", clean)
+        clean = re.sub(r"\n?```\s*$", "", clean).strip()
+
+    try:
+        data = json.loads(clean)
+    except json.JSONDecodeError:
+        # Last-ditch: try to find the outermost {...} block.
+        match = re.search(r"\{.*\}", clean, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group())
+            except json.JSONDecodeError:
+                raise ValueError(
+                    "The AI returned a response that could not be parsed as "
+                    "JSON. Please try again."
+                )
+        else:
+            raise ValueError("The AI did not return JSON. Please try again.")
+
+    def _parse_entries(
+        key: str,
+        default_weight: int,
+        exclude: dict[str, int] | None = None,
+    ) -> dict[str, int]:
+        """Parse a list of {term, weight} entries from *data[key]*."""
+        result: dict[str, int] = {}
+        for entry in data.get(key, []):
+            raw_term = str(entry.get("term", "")).strip()
+            weight = int(entry.get("weight", default_weight))
+            if not raw_term:
+                continue
+            cleaned = clean_term(raw_term, separator=separator)
+            if cleaned and (exclude is None or cleaned not in exclude):
+                result[cleaned] = max(WEIGHT_MIN, min(WEIGHT_MAX, weight))
+        return result
+
+    terms     = _parse_entries("terms",     default_weight=5000)
+    runner_ups = _parse_entries("runner_ups", default_weight=3000, exclude=terms)
+
+    if not terms:
+        raise ValueError(
+            "The AI returned no terms. "
+            "Check that the file is a resume and try again."
+        )
+
+    # Remove single-word terms already covered by a higher-weight compound,
+    # e.g. standalone "BI" when "Power BI" is already in the list.
+    terms      = _dedupe_subword_terms(terms)
+    runner_ups = _dedupe_subword_terms(runner_ups, reference=terms)
+
+    lang = _detect_lang_simple(resume_text)
+    log.info(
+        "Parsed: %d terms, %d runner-ups, lang=%s",
+        len(terms), len(runner_ups), lang,
+    )
+    _ui(f"Done \u2014 {len(terms)} terms, {len(runner_ups)} runner-ups.")
+    return terms, runner_ups, lang, provider.name
 
 
-_exclusions = _load_exclusions()
+def _dedupe_subword_terms(
+    terms: dict[str, int],
+    reference: dict[str, int] | None = None,
+) -> dict[str, int]:
+    """Remove single-word terms already represented by a higher-weight compound.
 
+    A single-word term *T* is dropped when there exists a compound term
+    (2 words) that:
 
-def _lang_dict_to_sets(raw: dict) -> dict[str, set[str]]:
-    """Convert a ``{lang: [words]}`` dict to ``{lang: {words}}``,
-    silently skipping the ``_comment`` key."""
-    return {
-        k: set(v) for k, v in raw.items()
-        if k != "_comment" and isinstance(v, list)
-    }
+    - contains *T* as one of its component words (case-insensitive), **and**
+    - has weight >= *T*'s weight (i.e. the compound is at least as important).
 
+    The ``reference`` pool is checked alongside ``terms`` when deduplicating
+    runner-ups against already-accepted main terms.
 
-def _extract_terms_list(raw) -> frozenset[str]:
-    """Pull a flat term list from either ``[items]`` or
-    ``{"_comment": ..., "terms": [items]}``."""
-    if isinstance(raw, list):
-        return frozenset(raw)
-    if isinstance(raw, dict):
-        return frozenset(raw.get("terms", []))
-    return frozenset()
+    Examples::
 
+        "BI" (7400)  → dropped   ("Power BI" at 9800 covers it)
+        "SQL" (8800) → kept      (no compound containing SQL outweighs it)
+        "Python" (8700) → kept   ("Python GUI" at 2000 does not outweigh it)
+    """
+    pool = dict(terms)
+    if reference:
+        pool.update(reference)
 
-SECTION_HEADERS = _lang_dict_to_sets(_exclusions.get("section_headers", {}))
-ACTION_VERBS_AND_FILLER = _lang_dict_to_sets(
-    _exclusions.get("action_verbs_and_filler", {}),
-)
-DEGREE_TERMS = _lang_dict_to_sets(_exclusions.get("degree_terms", {}))
-DATE_TERMS = _lang_dict_to_sets(_exclusions.get("date_terms", {}))
-RESUME_METADATA = _lang_dict_to_sets(_exclusions.get("resume_metadata", {}))
-BANNED_SUBSTRINGS = _lang_dict_to_sets(_exclusions.get("banned_substrings", {}))
-NEVER_ALONE = _lang_dict_to_sets(_exclusions.get("never_alone", {}))
+    result: dict[str, int] = {}
+    for term, weight in terms.items():
+        parts = re.split(r"[ _]+", term)
+        if len(parts) != 1:
+            # Compound terms are always kept.
+            result[term] = weight
+            continue
 
+        t_lower = term.lower()
+        covered = any(
+            other != term
+            and len(re.split(r"[ _]+", other)) > 1
+            and t_lower in [p.lower() for p in re.split(r"[ _]+", other)]
+            and other_w >= weight
+            for other, other_w in pool.items()
+        )
+        if not covered:
+            result[term] = weight
+        else:
+            log.debug("Deduped subword '%s' (covered by a compound)", term)
 
-def _merge_lang(source: dict[str, set[str]], lang: str) -> set[str]:
-    """Merge the 'en' set with the language-specific set."""
-    result = set(source.get("en", set()))
-    if lang != "en":
-        result |= source.get(lang, set())
     return result
 
 
-def _flatten_all(source: dict[str, set[str]]) -> frozenset[str]:
-    """Merge ALL language sets into one for universal filtering."""
-    result: set[str] = set()
-    for k, v in source.items():
-        result |= v
-    return frozenset(result)
+def _validate_content(text: str) -> tuple[bool, str]:
+    """Check that extracted text is plausible resume content.
 
+    Returns a ``(ok, reason)`` tuple. When ``ok`` is ``False``, ``reason``
+    is a user-friendly explanation of the problem.
+    """
+    stripped = text.strip()
+    n = len(stripped)
 
-# Flat sets for filtering (all languages combined).
-ALL_RESUME_METADATA = _flatten_all(RESUME_METADATA)
-ALL_BANNED_SUBSTRINGS = _flatten_all(BANNED_SUBSTRINGS)
-ALL_NEVER_ALONE = _flatten_all(NEVER_ALONE)
+    if n == 0:
+        return False, (
+            "No text could be extracted from this file.\n\n"
+            "If this is a scanned PDF (an image of a document rather than a "
+            "text-based PDF), the AI will have nothing to read.\n\n"
+            "Try exporting your resume as a text-based PDF from Word, "
+            "Google Docs, or Acrobat."
+        )
+
+    if n < 150:
+        return False, (
+            f"Only {n} characters were extracted — unusually short for a "
+            f"resume.\n\n"
+            f"The file may be image-based, password-protected, or not a resume."
+        )
+
+    # High proportion of non-printable / replacement characters indicates
+    # binary data that slipped through the encoding fallback.
+    non_print = sum(1 for c in stripped if ord(c) < 32 and c not in "\n\r\t")
+    replacements = stripped.count("\ufffd")  # Unicode replacement character
+    garbage_ratio = (non_print + replacements) / n
+    if garbage_ratio > 0.05:
+        return False, (
+            f"The extracted text contains {garbage_ratio:.0%} unreadable "
+            f"characters.\n\n"
+            f"The file may be password-protected, corrupted, or in a format "
+            f"that cannot be read as plain text."
+        )
+
+    return True, ""
 
 
 # ---------------------------------------------------------------------------
-# Compound-term contaminant set
+# File reading
 # ---------------------------------------------------------------------------
-# Individual words that, when found as a COMPONENT of a multi-word term,
-# indicate the term is a YAKE artefact (structural label glued to content)
-# rather than a genuine skill.  Built by decomposing resume_metadata and
-# date_terms into single words, plus known section-header words that are
-# NEVER part of a real skill name.
-#
-# Example: "Overview_Python_GUI" → "overview" is a contaminant → REJECTED.
-#          "Data_Science"        → neither word is a contaminant → PASS.
-
-def _build_contaminants() -> frozenset[str]:
-    """Build the set of words that poison compound terms."""
-    words: set[str] = set()
-
-    # All single words from resume metadata phrases.
-    for phrase in ALL_RESUME_METADATA:
-        for w in phrase.lower().split():
-            if len(w) >= 3:  # Catch short structural words like "usa", "gpa"
-                words.add(w)
-
-    # All date terms (month names, "year", "annual", etc.).
-    for lang_set in DATE_TERMS.values():
-        for w in lang_set:
-            if len(w) >= 3 and " " not in w:
-                words.add(w.lower())
-
-    # All degree terms ("bachelor", "diploma", "thesis", etc.).
-    for lang_set in DEGREE_TERMS.values():
-        for w in lang_set:
-            if len(w) >= 3 and " " not in w:
-                words.add(w.lower())
-
-    # All never_alone terms are also compound contaminants.
-    words.update(ALL_NEVER_ALONE)
-
-    # Action verbs and filler — these poison compounds like
-    # "Managed_Georgetown" or "Developed_Excel".
-    for lang_set in ACTION_VERBS_AND_FILLER.values():
-        for w in lang_set:
-            if len(w) >= 3 and " " not in w:
-                words.add(w.lower())
-
-    # Section-header words that are purely structural.
-    structural_headers = {
-        "overview", "summary", "objective", "profile",
-        "education", "experience", "employment", "history",
-        "accomplishments", "achievements", "recognition",
-        "interests", "hobbies", "activities",
-        "references", "affiliations", "memberships",
-        "volunteer", "volunteering",
-        "coursework", "highlights",
-        "experiencia", "formación", "educación",
-        "expérience", "ausbildung", "erfahrung",
-    }
-    words.update(structural_headers)
-
-    generic_structural = {
-        "employer", "employee", "supervisor", "duties",
-        "responsibilities", "obtained", "awarded", "conferred",
-        "leaving", "authorization", "clearance", "sponsorship",
-        "nationality", "citizenship", "relocation",
-        "availability", "permitted", "allowed",
-        "continued", "attached", "enclosed",
-        "modality", "unpaid", "seasonal", "temporary",
-        "professionals", "student", "students",
-        "download", "upload",
-        # URL / web artefacts that bleed into YAKE compounds.
-        "bitly", "http", "https", "www", "html", "pdf",
-    }
-    words.update(generic_structural)
-
-    # PROTECT legitimate skill-adjacent words — remove them from
-    # the contaminant set even if they were pulled in above.
-    # These words commonly appear in real skill names.
-    protected = {
-        "data", "analysis", "management", "design", "system",
-        "systems", "development", "science", "research",
-        "engineering", "learning", "network", "programming",
-        "modeling", "testing", "security", "architecture",
-        "analytics", "intelligence", "automation", "cloud",
-        "database", "mobile", "digital", "strategic",
-        "financial", "technical", "clinical", "statistical",
-        "machine", "deep", "natural", "business", "project",
-        "product", "process", "quality", "performance",
-        "information", "communication", "operations",
-        "marketing", "leadership", "training", "work",
-        "python", "java", "excel", "power", "azure",
-        "tableau", "linux", "docker", "react",
-        "full", "stack", "front", "back", "devops",
-        "agile", "scrum", "lean", "sigma",
-        "teaching", "writing", "speaking", "consulting",
-        "planning", "budgeting", "forecasting", "reporting",
-        "visualization", "modelling", "simulation",
-        "compliance", "audit", "governance", "risk",
-        "applied", "advanced", "senior", "junior", "field",
-    }
-    words -= protected
-
-    return frozenset(words)
-
-
-COMPOUND_CONTAMINANTS: frozenset[str] = _build_contaminants()
-
-log.info(
-    "Filter stats: %d section-header langs, %d metadata terms, "
-    "%d banned substrings, %d contaminants, %d never-alone",
-    len(SECTION_HEADERS), len(RESUME_METADATA),
-    len(BANNED_SUBSTRINGS), len(COMPOUND_CONTAMINANTS),
-    len(NEVER_ALONE),
-)
-
-
-# ===================================================================== #
-#                         BACKEND / NLP ENGINE                           #
-# ===================================================================== #
-
 def extract_text_from_file(file_path: str) -> str:
-    """Read raw text from a PDF, DOCX, or TXT resume file."""
+    """Read raw text from a PDF, DOCX, or TXT file.
+
+    Args:
+        file_path: Absolute or relative path to the source file.
+
+    Returns:
+        The extracted plain-text content.
+
+    Raises:
+        RuntimeError: If the file extension is not supported.
+    """
     ext = os.path.splitext(file_path)[1].lower()
     log.info("Reading file: %s (type: %s)", file_path, ext)
+
     if ext == ".pdf":
         import pdfplumber
         with pdfplumber.open(file_path) as pdf:
             text = "\n".join(p.extract_text() or "" for p in pdf.pages)
-            log.info("PDF: %d pages, %d chars", len(pdf.pages), len(text))
-            return text
+        log.info("PDF: %d pages, %d chars", len(pdf.pages), len(text))
+        return text
+
     if ext == ".docx":
         import docx
         doc = docx.Document(file_path)
         text = "\n".join(p.text for p in doc.paragraphs)
         log.info("DOCX: %d paragraphs, %d chars", len(doc.paragraphs), len(text))
         return text
+
     if ext == ".txt":
         with open(file_path, "r", encoding="utf-8") as fh:
             text = fh.read()
         log.info("TXT: %d chars", len(text))
         return text
+
     raise RuntimeError(f"Unsupported file type: {ext}")
 
 
-def validate_resume(text, lang=None):
-    """Heuristically score whether *text* looks like a resume."""
-    log.debug("validate_resume: %d chars, lang=%s", len(text or ""), lang)
-    if not text or not text.strip():
-        return False, 0.0, [], ["Document is empty."]
-    if lang is None:
-        try:
-            lang = detect_language(text)
-        except Exception:
-            lang = "en"
+# ---------------------------------------------------------------------------
+# Term formatting
+# ---------------------------------------------------------------------------
+def clean_term(term: str, separator: str = "_") -> str:
+    """Normalise a term string for display.
 
-    text_lower = text.lower()
-    signals, warn = [], []
-    score = 0.0
+    Strips surrounding punctuation, then rejoins words with *separator*.
+    Casing is intentionally preserved exactly as the AI returns it — the
+    prompt instructs the AI to use official brand casing.
 
-    # 1. Length.
-    wc = len(text.split())
-    if wc < 50:
-        warn.append(f"Very short ({wc} words).")
-    elif wc < 150:
-        warn.append(f"Short ({wc} words).")
-        score += 0.03
-    elif wc <= 6000:
-        signals.append(f"Reasonable length ({wc} words).")
-        score += 0.10
-    else:
-        warn.append(f"Very long ({wc} words).")
-        score += 0.03
+    Args:
+        term:      Raw term string from the AI response.
+        separator: ``"_"`` or ``" "`` to join multi-word terms.
 
-    # 2. Section headers.
-    all_h = set()
-    for cl in {"universal", "en", lang}:
-        all_h.update(SECTION_HEADERS.get(cl, set()))
-    hits = set()
-    for h in all_h:
-        for p in [
-            re.compile(r"(?:^|\n)\s*" + re.escape(h) + r"\s*[:\-|]?\s*(?:\n|$)", re.I | re.M),
-            re.compile(r"(?:^|\n)\s*" + re.escape(h.upper()) + r"\s*(?:\n|$)", re.M),
-        ]:
-            if p.search(text):
-                hits.add(h)
-                break
-    if len(hits) >= 4:
-        signals.append(f"{len(hits)} section headers found.")
-        score += 0.30
-    elif len(hits) >= 2:
-        signals.append(f"{len(hits)} section headers found.")
-        score += 0.18
-    elif len(hits) == 1:
-        signals.append("1 section header found.")
-        score += 0.08
-    else:
-        warn.append("No section headers found.")
-
-    # 3. Contact info.
-    ct = 0
-    if re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text):
-        signals.append("Email found."); ct += 1
-    for p in [r"\+?\d[\d\-\.\s\(\)]{7,15}\d", r"\(\d{3}\)\s*\d{3}[\-\.]\d{4}"]:
-        if re.search(p, text):
-            signals.append("Phone found."); ct += 1; break
-    if re.search(r"linkedin\.com/in/", text_lower):
-        signals.append("LinkedIn URL."); ct += 1
-    if ct >= 3: score += 0.20
-    elif ct >= 2: score += 0.15
-    elif ct >= 1: score += 0.08
-    else: warn.append("No contact info.")
-
-    # 4. Date ranges.
-    dc = sum(len(re.findall(p, text_lower)) for p in [
-        r"\b20\d{2}\s*[\-\u2013\u2014]\s*(?:20\d{2}|present|current|presente|actuellement)\b",
-        r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*\d{4}\s*[\-\u2013\u2014]",
-        r"(?:^|\n)\s*20[12]\d\s*(?:\n|$)",
-    ])
-    if dc >= 3: signals.append(f"{dc} date ranges."); score += 0.15
-    elif dc >= 1: signals.append(f"{dc} date range(s)."); score += 0.08
-    else: warn.append("No date ranges.")
-
-    # 5. Skills.
-    sk = {"python", "java", "javascript", "sql", "excel", "power bi",
-          "tableau", "machine learning", "data analysis", "aws", "azure",
-          "docker", "react", "tensorflow", "pandas", "git", "linux", "figma"}
-    sh = sum(1 for s in sk if s in text_lower)
-    if sh >= 5: signals.append(f"{sh} skill keywords."); score += 0.10
-    elif sh >= 2: signals.append(f"{sh} skill keywords."); score += 0.06
-
-    # 6. Bullets.
-    bl = len(re.findall(r"(?:^|\n)\s*[\u2022\u25aa\u25b8\u25e6\u2023\-\*\u2013]\s+\w", text))
-    if bl >= 5: signals.append(f"{bl} bullet points."); score += 0.07
-    elif bl >= 2: score += 0.04
-
-    # 7. Negative.
-    for p, lb in [
-        (r"\btable of contents\b", "Table of Contents"),
-        (r"\bdear\s+(?:sir|madam|hiring|mr|ms)\b", "Cover letter"),
-        (r"\bchapter\s+\d+\b", "Chapter headings"),
-    ]:
-        if re.search(p, text_lower): warn.append(lb + "."); score -= 0.08
-
-    conf = max(0.0, min(1.0, score))
-    log.info("validate_resume: conf=%.2f, pass=%s, signals=%d, warns=%d",
-             conf, conf >= 0.40, len(signals), len(warn))
-    return conf >= 0.40, conf, signals, warn
-
-
-def detect_language(text: str) -> str:
-    """Detect primary language of *text*."""
-    try:
-        from langdetect import DetectorFactory, detect
-        DetectorFactory.seed = 0
-        lang = detect(text[:5000])
-        log.info("Language detected: %s", lang)
-        return lang
-    except ImportError:
-        raise RuntimeError("pip install langdetect")
-    except Exception as exc:
-        log.warning("Language detection failed (%s), defaulting to 'en'", exc)
-        return "en"
-
-
-def build_stopwords(lang_code: str) -> set[str]:
-    """Assemble stopword set for *lang_code*."""
-    sw: set[str] = set()
-    _map = {"en": "en", "es": "es", "fr": "fr", "de": "de", "pt": "pt",
-            "it": "it", "nl": "nl", "ca": "ca", "ru": "ru",
-            "zh-cn": "zh", "zh-tw": "zh", "ja": "ja", "ko": "ko",
-            "ar": "ar", "hi": "hi", "pl": "pl", "sv": "sv"}
-    try:
-        sw.update(spacy.blank(_map.get(lang_code, lang_code)).Defaults.stop_words)
-    except Exception:
-        pass
-
-    def _add(src):
-        sw.update(src.get("universal", set()))
-        sw.update(src.get(lang_code, set()))
-        sw.update(src.get("en", set()))
-
-    _add(SECTION_HEADERS)
-    _add(ACTION_VERBS_AND_FILLER)
-    _add(DEGREE_TERMS)
-    _add(DATE_TERMS)
-    log.info("Stopwords for '%s': %d total", lang_code, len(sw))
-    return sw
-
-
-def load_spacy_model(lang_code):
-    """Load the best available spaCy model for *lang_code*."""
-    prefs = {
-        "en": ["en_core_web_sm"], "es": ["es_core_news_sm"],
-        "fr": ["fr_core_news_sm"], "de": ["de_core_news_sm"],
-        "pt": ["pt_core_news_sm"], "it": ["it_core_news_sm"],
-        "nl": ["nl_core_news_sm"], "ca": ["ca_core_news_sm"],
-        "zh-cn": ["zh_core_web_sm"], "ja": ["ja_core_news_sm"],
-        "ko": ["ko_core_news_sm"], "ru": ["ru_core_news_sm"],
-        "pl": ["pl_core_news_sm"],
-    }
-    for name in prefs.get(lang_code, []) + ["xx_ent_wiki_sm"]:
-        try:
-            nlp = spacy.load(name)
-            log.info("Loaded spaCy model: %s", name)
-            return nlp, name
-        except OSError:
-            log.debug("Model '%s' not installed, trying next", name)
-            continue
-    # Last resort — blank pipeline (no NER, but POS still works).
-    log.warning("No trained model for '%s', using blank pipeline", lang_code)
-    return spacy.blank("xx"), "xx (blank)"
-
-
-def yake_extract(text, lang):
-    """YAKE keyword extraction (lower score = more relevant)."""
-    import yake
-    ext = yake.KeywordExtractor(
-        lan=lang.split("-")[0], n=2, dedupLim=0.7,
-        dedupFunc="seqm", windowsSize=1, top=80,
-    )
-    return ext.extract_keywords(text)
-
-
-def matches_filler_pattern(text):
-    return any(p.match(text) for p in FILLER_PATTERNS)
-
-
-def clean_term(term, lang="en", separator="_"):
-    """Normalise a term for display, using *separator* between words."""
+    Returns:
+        The cleaned term, or an empty string if nothing remains.
+    """
     cjk_punct = "\u3002\u3001\uff0c\uff1b\uff1a\uff01\uff1f"
     term = term.strip().strip(string.punctuation + cjk_punct).strip()
     if not term:
         return ""
-    if lang in ("zh-cn", "zh-tw", "zh", "ja", "ko"):
-        return term
-    # Normalise internal whitespace to the separator.
-    term = re.sub(r"\s+", "_", term)
-    parts = []
-    for p in term.split("_"):
-        if not p:
-            continue
-        if p.upper() in PRESERVE_UPPER:
-            parts.append(p.upper())
-        elif p.isupper() and len(p) <= 5:
-            parts.append(p)
-        else:
-            parts.append(p.capitalize())
+    parts = [p for p in re.split(r"[\s_]+", term) if p]
     return separator.join(parts)
 
 
-def is_valid_term(term, excluded, stopwords):
-    """Decide whether *term* belongs on the banner."""
-    if not term:
-        return False
-    raw = term.replace("_", " ").lower().strip()
-    # Strip trailing possessives: "Professionals'" → "professionals"
-    raw = re.sub(r"['\u2019]s?\b", "", raw).strip()
-    if len(raw) < 2:
-        return False
-    if raw in stopwords or raw in excluded or raw in ALL_RESUME_METADATA:
-        return False
-    if re.match(r"^[\d\W]+$", raw, re.UNICODE):
-        return False
-    if matches_filler_pattern(raw):
-        return False
+# ---------------------------------------------------------------------------
+# Word cloud generation
+# ---------------------------------------------------------------------------
+def find_font(lang: str) -> str | None:
+    """Return a system font path suitable for *lang*, or ``None`` for Latin.
 
-    words = raw.split()
-
-    # --- Single-word check ---
-    if len(words) == 1:
-        if raw in ALL_NEVER_ALONE:
-            return False
-
-    # --- Compound-term checks (2+ words only) ---
-    if len(words) >= 2:
-        # Banned substrings (exact phrase matches).
-        for banned in ALL_BANNED_SUBSTRINGS:
-            if banned in raw:
-                return False
-
-        # Component contamination — strip possessives from each word
-        # before checking ("Professionals'" → "professionals").
-        for w in words:
-            w_clean = re.sub(r"['\u2019]s?$", "", w)
-            if w_clean in COMPOUND_CONTAMINANTS:
-                return False
-            # Also reject if a component is a dynamically-excluded term
-            # (e.g. person's name, city from header parsing or NER).
-            if w_clean in excluded:
-                return False
-
-        # Repeated words ("Department_Department").
-        if len(set(words)) == 1:
-            return False
-
-    # Reject 3+ word compounds (almost always YAKE artefacts).
-    if len(words) > 2:
-        return False
-
-    # Allow single CJK characters; reject single Latin chars except R, C.
-    if len(raw) == 1:
-        if (unicodedata.category(raw[0]).startswith("L")
-                and ord(raw[0]) < 0x2E80):
-            return raw.upper() in ("R", "C")
-    return True
-
-
-def _extract_header_exclusions(text: str) -> set[str]:
-    """Parse the resume header (first ~500 chars) and return terms to exclude.
-
-    This catches the person's name, city, state, country, email fragments,
-    GitHub usernames, LinkedIn slugs, and phone digits — all of which are
-    personal info that should never appear on a word cloud.
-
-    Runs before spaCy NER so personal info is excluded even if the
-    trained model misses something.
+    Checks standard installation paths on Linux, macOS, and Windows for
+    CJK, Arabic, and Devanagari fonts.
     """
-    excl: set[str] = set()
-    header = text[:600]
-    lines = [ln.strip() for ln in header.splitlines() if ln.strip()]
-    if not lines:
-        return excl
-
-    # --- 1. First non-empty line is almost always the person's name ---
-    name_line = lines[0]
-    # Strip phone numbers and emails that might sit on the same line.
-    name_line = re.sub(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", "", name_line)
-    name_line = re.sub(r"\+?\d[\d\-\.\s\(\)]{7,15}\d", "", name_line)
-    name_line = re.sub(r"https?://\S+", "", name_line)
-    name_line = re.sub(r"github\.com/\S+", "", name_line)
-    name_line = re.sub(r"linkedin\.com/in/\S+", "", name_line)
-    # Whatever remains is likely the name.
-    for word in name_line.split():
-        w = word.strip(string.punctuation).lower()
-        if len(w) >= 2:
-            excl.add(w)
-
-    # --- 2. Scan the full header for contact / location artefacts ---
-    header_lower = header.lower()
-
-    # Email local parts (before @).
-    for m in re.finditer(r"([a-zA-Z0-9._%+-]+)@", header):
-        for part in re.split(r"[._]", m.group(1)):
-            if len(part) >= 2:
-                excl.add(part.lower())
-
-    # GitHub / LinkedIn usernames.
-    for m in re.finditer(r"github\.com/([a-zA-Z0-9_-]+)", header, re.I):
-        excl.add(m.group(1).lower())
-    for m in re.finditer(r"linkedin\.com/in/([a-zA-Z0-9_-]+)", header, re.I):
-        excl.add(m.group(1).lower())
-    # Short form: "in/pbachas" without the full linkedin.com domain.
-    for m in re.finditer(r"(?:^|\s)in/([a-zA-Z0-9_-]+)", header):
-        excl.add(m.group(1).lower())
-
-    # US states (full names and abbreviations).
-    us_states = {
-        "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
-        "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
-        "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
-        "maine", "maryland", "massachusetts", "michigan", "minnesota",
-        "mississippi", "missouri", "montana", "nebraska", "nevada",
-        "new hampshire", "new jersey", "new mexico", "new york",
-        "north carolina", "north dakota", "ohio", "oklahoma", "oregon",
-        "pennsylvania", "rhode island", "south carolina", "south dakota",
-        "tennessee", "texas", "utah", "vermont", "virginia", "washington",
-        "west virginia", "wisconsin", "wyoming", "district of columbia",
+    font_map: dict[str, list[str]] = {
+        "cjk": [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
+            "C:\\Windows\\Fonts\\msyh.ttc",
+        ],
+        "arabic": [
+            "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+            "C:\\Windows\\Fonts\\arial.ttf",
+        ],
+        "devanagari": [
+            "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+            "C:\\Windows\\Fonts\\mangal.ttf",
+        ],
     }
-    for st in us_states:
-        if st in header_lower:
-            excl.add(st)
-            for w in st.split():
-                excl.add(w)
 
-    # Country names commonly found on resumes.
-    countries = {
-        "united states", "united kingdom", "canada", "australia", "india",
-        "germany", "france", "spain", "italy", "brazil", "mexico",
-        "argentina", "colombia", "chile", "peru",
-    }
-    for c in countries:
-        if c in header_lower:
-            excl.add(c)
-            for w in c.split():
-                if len(w) >= 3:
-                    excl.add(w)
-
-    # City + State patterns like "Miami, FL" or "Coral Gables, Florida".
-    city_state = re.findall(
-        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*"
-        r"([A-Z]{2}|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)",
-        header,
-    )
-    for city, state in city_state:
-        for w in city.lower().split():
-            excl.add(w)
-        for w in state.lower().split():
-            excl.add(w)
-
-    log.info("Header exclusions: %d terms — %s",
-             len(excl), sorted(excl)[:20])
-    return excl
-
-
-def extract_terms(resume_text, progress_callback=None,
-                  lang_override=None, separator="_"):
-    """Extract weighted professional terms using spaCy + YAKE.
-
-    Pipeline:
-        1. Header parsing   → personal-info exclusions
-        2. spaCy NER        → entity exclusions (names, orgs, locations, dates)
-        3. spaCy noun chunks → candidate skill phrases
-        4. spaCy POS tokens  → candidate single-word skills
-        5. YAKE keywords     → statistically important terms
-        6. Merge, weight, rank → top MAX_TERMS + runner-ups
-    """
-    def _ui(msg):
-        if progress_callback:
-            progress_callback(msg)
-
-    log.info("extract_terms: %d chars, lang_override=%s, sep='%s'",
-             len(resume_text or ""), lang_override, separator)
-
-    # -- Language detection --
-    if lang_override:
-        lang = lang_override
-        _ui(f"Language (manual): {lang}")
-    else:
-        _ui("Detecting language \u2026")
-        lang = detect_language(resume_text)
-        _ui(f"Detected language: {lang}")
-
-    stopwords = build_stopwords(lang)
-
-    # -- 1. Header parsing (always runs) --
-    _ui("Parsing header for personal info \u2026")
-    excluded = _extract_header_exclusions(resume_text)
-
-    # -- 2–4. spaCy: NER, noun phrases, POS tokens --
-    _ui("Loading NLP model \u2026")
-    nlp, model_name = load_spacy_model(lang)
-    _ui(f"Model: {model_name}")
-
-    _ui("Parsing resume \u2026")
-    doc = nlp(resume_text[:100_000])
-    log.debug("spaCy doc: %d tokens, %d ents", len(doc), len(doc.ents or []))
-
-    # NER exclusions.
-    excl_labels = {
-        "PERSON", "PER", "ORG", "GPE", "LOC", "DATE", "TIME",
-        "MONEY", "CARDINAL", "ORDINAL", "FAC", "NORP", "EVENT",
-        "QUANTITY", "PERCENT",
-    }
-    for ent in (doc.ents or []):
-        if ent.label_ in excl_labels:
-            excluded.add(ent.text.lower().strip())
-            for w in ent.text.lower().split():
-                if len(w) > 2:
-                    excluded.add(w)
-    log.debug("Total exclusions: %d", len(excluded))
-
-    # Noun phrases.
-    _ui("Extracting noun phrases \u2026")
-    noun_phrases = []
-    skip_pos = {"DET", "PRON", "PUNCT", "SPACE", "NUM", "SYM",
-                "ADP", "CCONJ", "SCONJ", "AUX", "PART"}
-    if doc.has_annotation("DEP"):
-        for chunk in doc.noun_chunks:
-            toks = [t for t in chunk
-                    if t.pos_ not in skip_pos
-                    and t.text.lower() not in stopwords
-                    and len(t.text) > 1 and not t.is_stop]
-            if toks:
-                phrase = " ".join(t.text for t in toks).strip()
-                if len(phrase) > 2:
-                    noun_phrases.append(phrase)
-    log.debug("Noun phrases: %d", len(noun_phrases))
-
-    # POS-filtered tokens.
-    _ui("Collecting tokens \u2026")
-    tech_tokens = []
-    has_pos = doc.has_annotation("TAG") or doc.has_annotation("POS")
-    for token in doc:
-        txt = token.text.strip()
-        if not txt or len(txt) < 3:
-            continue
-        if txt.lower() in stopwords or txt.lower() in excluded:
-            continue
-        if token.like_num or token.like_email or token.like_url:
-            continue
-        if all(c in string.punctuation for c in txt):
-            continue
-        if has_pos:
-            if token.pos_ not in ("NOUN", "PROPN", "ADJ"):
-                continue
-            if token.is_stop:
-                continue
-        tech_tokens.append(txt)
-    log.debug("Tech tokens: %d", len(tech_tokens))
-
-    # -- 5. YAKE keywords --
-    _ui("Running YAKE \u2026")
-    yake_results = yake_extract(resume_text, lang)
-    log.info("YAKE returned %d candidates", len(yake_results))
-
-    # -- 6. Merge, weight, rank --
-    _ui("Scoring terms \u2026")
-    all_terms = []
-    for phrase in noun_phrases:
-        c = clean_term(phrase, lang, separator)
-        if is_valid_term(c, excluded, stopwords):
-            all_terms.extend([c] * NOUN_PHRASE_MULTIPLIER)
-    for term, score in yake_results:
-        c = clean_term(term, lang, separator)
-        if is_valid_term(c, excluded, stopwords):
-            reps = max(1, min(YAKE_MULTIPLIER_CAP, int(6 / (score + 0.1))))
-            all_terms.extend([c] * reps)
-    for tok in tech_tokens:
-        c = clean_term(tok, lang, separator)
-        if is_valid_term(c, excluded, stopwords):
-            all_terms.extend([c] * TOKEN_MULTIPLIER)
-
-    counts = Counter(all_terms)
-    if not counts:
-        log.warning("No valid terms after filtering — returning fallback")
-        return {"Professional": 5000, "Skills": 5000}, {}, lang, model_name
-
-    mx = max(counts.values())
-    log_mx = math.log(mx + 1)
-    all_ranked = counts.most_common()
-
-    weighted = {}
-    for term, count in all_ranked[:MAX_TERMS]:
-        n = math.log(count + 1) / log_mx if log_mx > 0 else 1.0
-        weighted[term] = int(WEIGHT_MIN + (WEIGHT_MAX - WEIGHT_MIN) * n)
-
-    runner_ups: dict[str, int] = {}
-    for term, count in all_ranked[MAX_TERMS : MAX_TERMS + 30]:
-        n = math.log(count + 1) / log_mx if log_mx > 0 else 1.0
-        runner_ups[term] = int(WEIGHT_MIN + (WEIGHT_MAX - WEIGHT_MIN) * n)
-
-    log.info("Final terms: %d, runner-ups: %d", len(weighted), len(runner_ups))
-    _ui(f"Done \u2014 {len(weighted)} terms.")
-    return weighted, runner_ups, lang, model_name
-
-
-def find_font(lang):
-    """Find a system font for *lang* or None."""
-    fm = {
-        "cjk": ["/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-                "/System/Library/Fonts/PingFang.ttc",
-                "C:\\Windows\\Fonts\\msyh.ttc"],
-        "arabic": ["/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
-                   "C:\\Windows\\Fonts\\arial.ttf"],
-        "devanagari": ["/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-                       "C:\\Windows\\Fonts\\mangal.ttf"],
-    }
     if lang in ("zh-cn", "zh-tw", "zh", "ja", "ko"):
-        fam = "cjk"
+        family = "cjk"
     elif lang in ("ar", "fa", "ur", "he"):
-        fam = "arabic"
+        family = "arabic"
     elif lang in ("hi", "mr", "ne"):
-        fam = "devanagari"
+        family = "devanagari"
     else:
         return None
-    for p in fm[fam]:
-        if os.path.isfile(p):
-            return p
+
+    for path in font_map[family]:
+        if os.path.isfile(path):
+            return path
     return None
 
 
-def generate_wordcloud(terms, background_color="white", colormap="turbo",
-                       output_path="linkedin_banner.png", lang="en"):
-    """Render and save a LinkedIn-banner word cloud."""
-    log.info("generate_wordcloud: %d terms, bg=%s, cmap=%s, lang=%s",
-             len(terms), background_color, colormap, lang)
-    rand = {}
-    for t, w in terms.items():
-        j = int(w * 0.10)
-        rand[t] = random.randint(max(100, w - j), min(WEIGHT_MAX, w + j))
+def generate_wordcloud(
+    terms: dict[str, int],
+    background_color: str = "white",
+    colormap: str = "turbo",
+    output_path: str = "linkedin_banner.png",
+    lang: str = "en",
+) -> str:
+    """Render a LinkedIn-banner word cloud and save it as a PNG.
 
-    kw = dict(width=BANNER_WIDTH, height=BANNER_HEIGHT,
-              background_color=background_color, colormap=colormap,
-              prefer_horizontal=0.7, min_font_size=8, max_words=200,
-              collocations=False, regexp=r"[\w\-\+\#']+")
-    fp = find_font(lang)
-    if fp:
-        kw["font_path"] = fp
-        log.debug("Using font: %s", fp)
+    Applies a ±10% weight jitter for visual variety, quantises the output
+    if it exceeds ``MAX_FILE_SIZE_MB``, and returns the final output path.
 
-    wc = WordCloud(**kw).generate_from_frequencies(rand)
+    Args:
+        terms:            ``{display_term: weight}`` dict.
+        background_color: ``"white"`` or ``"black"``.
+        colormap:         Any matplotlib colormap name.
+        output_path:      Destination file path for the PNG.
+        lang:             BCP-47 language code used to select a system font.
+
+    Returns:
+        The path to the saved PNG file.
+    """
+    log.info(
+        "generate_wordcloud: %d terms, bg=%s, cmap=%s, lang=%s",
+        len(terms), background_color, colormap, lang,
+    )
+
+    # Jitter weights by ±10% to vary word sizes slightly across generations.
+    jittered = {
+        term: random.randint(
+            max(100, w - int(w * 0.10)),
+            min(WEIGHT_MAX, w + int(w * 0.10)),
+        )
+        for term, w in terms.items()
+    }
+
+    wc_kwargs: dict = dict(
+        width=BANNER_WIDTH,
+        height=BANNER_HEIGHT,
+        background_color=background_color,
+        colormap=colormap,
+        prefer_horizontal=0.7,
+        min_font_size=8,
+        max_words=200,
+        collocations=False,
+        normalize_plurals=False,
+        regexp=r"[\w\-\+\#']+",
+    )
+    font_path = find_font(lang)
+    if font_path:
+        wc_kwargs["font_path"] = font_path
+
+    wc = WordCloud(**wc_kwargs).generate_from_frequencies(jittered)
     fig, ax = plt.subplots(figsize=(15.84, 3.96))
     ax.imshow(wc, interpolation="bilinear")
     ax.axis("off")
@@ -921,42 +776,25 @@ def generate_wordcloud(terms, background_color="white", colormap="turbo",
                 bbox_inches="tight", pad_inches=0)
     plt.close(fig)
 
-    # PNG is lossless — the 'quality' param is ignored for PNG.
-    # If the file exceeds the limit, reduce colours (quantise).
-    img = Image.open(output_path)
-    fsize = os.path.getsize(output_path) / (1024 * 1024)
-    if fsize > MAX_FILE_SIZE_MB:
-        log.info("PNG too large (%.2f MB), quantising to 256 colours", fsize)
+    # Quantise to 256 colours if the lossless PNG is above the size cap.
+    file_mb = os.path.getsize(output_path) / (1024 * 1024)
+    if file_mb > MAX_FILE_SIZE_MB:
+        log.info("PNG too large (%.2f MB), quantising to 256 colours", file_mb)
+        img = Image.open(output_path)
         img = img.quantize(colors=256, method=Image.Quantize.MEDIANCUT)
         img.save(output_path, format="png", optimize=True)
-        fsize = os.path.getsize(output_path) / (1024 * 1024)
-    log.info("Saved: %s (%.2f MB)", output_path, fsize)
+        file_mb = os.path.getsize(output_path) / (1024 * 1024)
+
+    log.info("Saved: %s (%.2f MB)", output_path, file_mb)
     return output_path
 
 
-# ===================================================================== #
-#                          TKINTER GUI                                   #
-# ===================================================================== #
+# ============================================================================
+# GUI
+# ============================================================================
 
-# -- High-contrast palette (tested on macOS, Linux, Windows) ------------
-CLR_BG = "#e8ecf1"            # main window background
-CLR_FRAME = "#ffffff"          # card/panel background
-CLR_PRIMARY = "#1d4ed8"        # blue — buttons, accents
-CLR_PRIMARY_HV = "#1e40af"     # blue hover
-CLR_DANGER = "#b91c1c"         # red — remove button
-CLR_DANGER_HV = "#991b1b"      # red hover
-CLR_SUCCESS = "#15803d"        # green — analyse / add
-CLR_SUCCESS_HV = "#166534"     # green hover
-CLR_TEXT = "#0f172a"           # near-black body text
-CLR_TEXT_LIGHT = "#475569"     # secondary text (status, hints)
-CLR_TREE_BG = "#ffffff"        # treeview background
-CLR_TREE_FG = "#0f172a"        # treeview text
-CLR_TREE_SEL = "#bfdbfe"       # treeview selection highlight
-CLR_TREE_HEAD_BG = "#cbd5e1"   # treeview header background
-CLR_TREE_HEAD_FG = "#0f172a"   # treeview header text
-
-# Cross-platform font — pick the first available.
-_FONT_FAMILY = "Segoe UI"     # Windows
+#: Platform-aware font family for consistent rendering on macOS/Win/Linux.
+_FONT_FAMILY: str = "Segoe UI"
 if sys.platform == "darwin":
     _FONT_FAMILY = "Helvetica Neue"
 elif sys.platform.startswith("linux"):
@@ -964,408 +802,900 @@ elif sys.platform.startswith("linux"):
 
 
 def _downloads_folder() -> Path:
-    """Return the best output folder: /data (Docker) → ~/Downloads → ~."""
-    docker_data = Path("/data")
-    if docker_data.is_dir():
-        return docker_data
-    dl = Path.home() / "Downloads"
-    if dl.is_dir():
-        return dl
+    """Return the best available save destination.
+
+    Priority: ``/data`` (Docker volume) → ``~/Downloads`` → ``~``.
+    """
+    docker = Path("/data")
+    if docker.is_dir():
+        return docker
+    downloads = Path.home() / "Downloads"
+    if downloads.is_dir():
+        return downloads
     return Path.home()
 
 
-class WordCloudApp(tk.Tk):
+def _shorten_path(path_str: str, max_len: int = 55) -> str:
+    """Return the filename portion of *path_str*, truncated if necessary.
 
-    def __init__(self):
+    Appends a horizontal ellipsis (…) when the name exceeds *max_len*.
+    """
+    name = Path(path_str).name
+    return name if len(name) <= max_len else name[: max_len - 1] + "\u2026"
+
+
+def _friendly_api_error(exc: Exception) -> str:
+    """Translate a raw API exception into a concise user-facing message."""
+    msg = str(exc).lower()
+    if "credit" in msg or "quota" in msg or "insufficient" in msg:
+        return "No credits \u2014 add credits at the provider\u2019s billing page."
+    if "invalid" in msg and "key" in msg:
+        return "Invalid key \u2014 double-check you copied the whole thing."
+    if "rate limit" in msg:
+        return "Rate limit hit \u2014 wait a moment and try again."
+    if "401" in msg:
+        return "Authentication failed \u2014 key may be wrong or expired."
+    if "403" in msg:
+        return "Access denied \u2014 check your account has API access enabled."
+    if "timeout" in msg or "timed out" in msg:
+        return "Connection timed out \u2014 check your internet and try again."
+    raw = str(exc)
+    return raw[:120] + "\u2026" if len(raw) > 120 else raw
+
+
+# ---------------------------------------------------------------------------
+# Settings dialog
+# ---------------------------------------------------------------------------
+class SettingsDialog(tk.Toplevel):
+    """Two-panel dialog for selecting an AI provider and entering an API key.
+
+    Displays a provider picker, masked key entry with a Show/Hide toggle,
+    a live connection-test button, and a Save button that writes the key to
+    ``config.json`` and updates the main window's provider label.
+    """
+
+    #: Per-provider key hints and taglines shown in the dialog.
+    _HINTS: dict[str, tuple[str, str]] = {
+        "Claude":  (
+            "Starts with  sk-ant-api03-\u2026",
+            "Anthropic \u00b7 best for nuanced extraction",
+        ),
+        "ChatGPT": (
+            "Starts with  sk-proj-\u2026  or  sk-\u2026",
+            "OpenAI \u00b7 widely used",
+        ),
+        "Gemini":  (
+            "Starts with  AIza\u2026",
+            "Google \u00b7 free tier available",
+        ),
+        "Mistral": (
+            "A long random string of letters and numbers",
+            "Mistral AI \u00b7 efficient European model",
+        ),
+        "Groq":    (
+            "Starts with  gsk_\u2026",
+            "Groq \u00b7 extremely fast, generous free tier",
+        ),
+    }
+
+    def __init__(self, parent: WordCloudApp) -> None:
+        super().__init__(parent)
+        self.parent_app = parent
+        self.title("Settings \u2014 AI Provider")
+        self.configure(bg=C["bg"])
+        self.resizable(False, False)
+        self.grab_set()  # modal
+
+        _f  = _FONT_FAMILY
+        _fn = (_f, 10)
+        _fb = (_f, 10, "bold")
+        _fs = (_f, 9)
+        style = ttk.Style(self)
+
+        # ── Header ───────────────────────────────────────────────────────
+        tk.Label(
+            self, text="AI Provider Settings",
+            bg=C["bg"], fg=C["text"], font=(_f, 14, "bold"),
+        ).pack(anchor="w", padx=24, pady=(20, 2))
+        tk.Label(
+            self, text="Select a provider and paste your API key.",
+            bg=C["bg"], fg=C["text_light"], font=_fs,
+        ).pack(anchor="w", padx=24, pady=(0, 12))
+
+        # ── Provider picker ───────────────────────────────────────────────
+        pf = tk.Frame(
+            self, bg=C["frame"],
+            highlightbackground=C["border"], highlightthickness=1,
+        )
+        pf.pack(fill="x", padx=24, pady=(0, 12))
+
+        tk.Label(
+            pf, text="Provider:", bg=C["frame"], fg=C["text"], font=_fb,
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=10)
+
+        config = load_config()
+        initial = config.get("active_provider", "") or list(PROVIDERS.keys())[0]
+        self._provider_var = tk.StringVar(value=initial)
+        self._provider_combo = ttk.Combobox(
+            pf,
+            values=list(PROVIDERS.keys()),
+            textvariable=self._provider_var,
+            state="readonly",
+            width=18,
+        )
+        self._provider_combo.grid(row=0, column=1, sticky="w",
+                                  padx=(0, 12), pady=10)
+        self._provider_combo.bind("<<ComboboxSelected>>",
+                                  self._on_provider_change)
+
+        self._tagline_var = tk.StringVar()
+        tk.Label(
+            pf, textvariable=self._tagline_var,
+            bg=C["frame"], fg=C["text_light"], font=_fs,
+        ).grid(row=0, column=2, sticky="w", padx=(0, 12), pady=10)
+
+        # ── Key entry ─────────────────────────────────────────────────────
+        kf = tk.Frame(
+            self, bg=C["frame"],
+            highlightbackground=C["border"], highlightthickness=1,
+        )
+        kf.pack(fill="x", padx=24, pady=(0, 8))
+
+        tk.Label(
+            kf, text="API Key:", bg=C["frame"], fg=C["text"], font=_fb,
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
+
+        self._key_var  = tk.StringVar()
+        self._show_key = tk.BooleanVar(value=False)
+        self._key_entry = tk.Entry(
+            kf,
+            textvariable=self._key_var,
+            width=44,
+            show="\u2022",
+            font=_fn,
+            bg=C["entry_bg"],
+            fg=C["text"],
+            insertbackground=C["text"],
+            relief="flat",
+            highlightbackground=C["border"],
+            highlightthickness=1,
+        )
+        self._key_entry.grid(row=0, column=1, sticky="w",
+                             padx=(0, 8), pady=(12, 4))
+
+        style.configure("Small.TButton", font=(_f, 8), padding=(6, 3))
+        ttk.Button(
+            kf, text="Show", style="Small.TButton",
+            command=self._toggle_show,
+        ).grid(row=0, column=2, padx=(0, 12), pady=(12, 4))
+
+        self._hint_var = tk.StringVar()
+        tk.Label(
+            kf, textvariable=self._hint_var,
+            bg=C["frame"], fg=C["text_light"], font=_fs,
+        ).grid(row=1, column=1, columnspan=2,
+               sticky="w", padx=(0, 12), pady=(0, 12))
+
+        # ── Status line ───────────────────────────────────────────────────
+        self._status_var = tk.StringVar()
+        tk.Label(
+            self, textvariable=self._status_var,
+            bg=C["bg"], fg=C["text_light"], font=(_f, 9, "italic"),
+        ).pack(anchor="w", padx=24, pady=(0, 4))
+
+        # ── Buttons ───────────────────────────────────────────────────────
+        bf = tk.Frame(self, bg=C["bg"])
+        bf.pack(fill="x", padx=24, pady=(4, 20))
+
+        for btn_name, bg_, hv_, fg_ in [
+            ("Primary.TButton", C["primary"], C["primary_hv"], "#ffffff"),
+            ("Success.TButton", C["success"], C["success_hv"], "#ffffff"),
+        ]:
+            style.configure(
+                btn_name, background=bg_, foreground=fg_,
+                font=(_f, 9, "bold"), padding=(14, 5),
+                relief="flat", borderwidth=0,
+            )
+            style.map(
+                btn_name,
+                background=[("active", hv_), ("pressed", hv_)],
+                foreground=[("active", fg_), ("pressed", fg_)],
+            )
+
+        ttk.Button(
+            bf, text="Test Connection", style="Primary.TButton",
+            command=self._test,
+        ).pack(side="left", padx=(0, 8))
+        ttk.Button(
+            bf, text="Save", style="Success.TButton",
+            command=self._save,
+        ).pack(side="left")
+        ttk.Button(bf, text="Cancel", command=self.destroy).pack(side="right")
+
+        # Centre the dialog over its parent window.
+        self._on_provider_change()
+        self.update_idletasks()
+        w = self.winfo_reqwidth()
+        h = self.winfo_reqheight()
+        x = parent.winfo_x() + (parent.winfo_width()  - w) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - h) // 2
+        self.geometry(f"{w}x{h}+{x}+{y}")
+
+    # ── Event handlers ────────────────────────────────────────────────────
+
+    def _on_provider_change(self, *_) -> None:
+        """Populate the key field and hints when the provider selection changes."""
+        name = self._provider_var.get()
+        config = load_config()
+        self._key_var.set(config.get("keys", {}).get(name, ""))
+        hint, tagline = self._HINTS.get(name, ("", ""))
+        self._hint_var.set(hint)
+        self._tagline_var.set(tagline)
+        self._status_var.set("")
+
+    def _toggle_show(self) -> None:
+        """Toggle the API key entry between masked and plain-text display."""
+        self._show_key.set(not self._show_key.get())
+        self._key_entry.config(show="" if self._show_key.get() else "\u2022")
+
+    def _test(self) -> None:
+        """Fire a minimal API call to verify the entered key, in a thread."""
+        name = self._provider_var.get()
+        key  = self._key_var.get().strip()
+        if not key:
+            self._status_var.set("Paste an API key first.")
+            return
+        self._status_var.set("Testing connection \u2026")
+        self.update_idletasks()
+
+        def _worker() -> None:
+            try:
+                ok = get_provider(name, key).test_connection()
+                msg = (
+                    f"\u2713  Connected to {name}." if ok
+                    else f"\u2717  {name} returned an empty response."
+                )
+            except Exception as exc:
+                msg = f"\u2717  {_friendly_api_error(exc)}"
+            self.after(0, self._status_var.set, msg)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _save(self) -> None:
+        """Save the current provider and key to config, then close."""
+        name = self._provider_var.get()
+        key  = self._key_var.get().strip()
+        if not key:
+            self._status_var.set("Enter an API key before saving.")
+            return
+        config = load_config()
+        config.setdefault("keys", {})[name] = key
+        config["active_provider"] = name
+        save_config(config)
+        log.info("Saved API key for provider: %s", name)
+        self.parent_app._refresh_provider_label()
+        self.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Main application window
+# ---------------------------------------------------------------------------
+class WordCloudApp(tk.Tk):
+    """Top-level application window for the LinkedIn Banner Word Cloud Generator.
+
+    Layout (bottom-anchored):
+        - Preview image panel (always visible)
+        - Generate / Save / Export action buttons (always visible)
+        - Appearance section (hidden until terms are extracted)
+        - Scrollable upper area: file picker, term treeview, edit controls
+    """
+
+    #: File extensions accepted by Browse and Analyse Resume.
+    _SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".pdf", ".docx", ".txt"})
+
+    def __init__(self) -> None:
         super().__init__()
         self.title("LinkedIn Banner Word Cloud Generator")
-        self.configure(bg=CLR_BG)
+        self.configure(bg=C["bg"])
         self.minsize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
         self.update_idletasks()
-        # Size to 80% of screen so all controls are visible on launch.
+
+        # Size to 80 % of the screen, centred, nudged up slightly for taskbars.
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         w = max(WINDOW_MIN_WIDTH, int(sw * 0.80))
         h = max(WINDOW_MIN_HEIGHT, int(sh * 0.85))
         x = (sw - w) // 2
-        y = max(0, (sh - h) // 2 - 30)   # nudge up slightly for taskbar
+        y = max(0, (sh - h) // 2 - 30)
         self.geometry(f"{w}x{h}+{x}+{y}")
 
-        self.terms = {}
-        self.runner_ups = {}
-        self.user_excluded = set()       # terms the user explicitly removed
-        self._lock = threading.Lock()    # guards terms/runner_ups/user_excluded
-        self.detected_lang = "en"
-        self.spacy_model = ""
-        self.resume_text = ""
-        self.preview_image = None
-        self._sort_col = "weight"          # current sort column
-        self._sort_reverse = True           # descending by default
-        self.bg_var = tk.StringVar(value="white")
-        self.palette_var = tk.StringVar(value="turbo")
+        # ── Application state ─────────────────────────────────────────────
+        self.terms:          dict[str, int] = {}
+        self.runner_ups:     dict[str, int] = {}
+        self.user_excluded:  set[str]       = set()
+        self._lock           = threading.Lock()
+        self.detected_lang:  str  = "en"
+        self.resume_text:    str  = ""
+        self._file_path:     str  = ""   # full OS path used for file reading
+        self.preview_image         = None  # holds ImageTk reference to prevent GC
+
+        # Treeview sort state
+        self._sort_col:     str  = "weight"
+        self._sort_reverse: bool = True
+
+        # Tk variables
+        self.bg_var        = tk.StringVar(value="white")
+        self.palette_var   = tk.StringVar(value="turbo")
         self.separator_var = tk.StringVar(value="_")
-        self.lang_var = tk.StringVar(value="auto")
+        self.separator_var.trace_add("write", self._on_separator_change)
+
+        # Temp PNG written by Generate; cleaned up on close or regeneration.
+        self._temp_banner_path: str | None = None
+
+        # Widget references set in _build_ui, used for deferred show/pack.
+        self._appearance_frame     = None
+        self._action_buttons_frame = None
+
         self._build_ui()
+        self._refresh_provider_label()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # -- UI --
+    # ── UI construction ───────────────────────────────────────────────────
 
-    def _build_ui(self):
+    def _build_ui(self) -> None:
+        """Construct and lay out all widgets.
+
+        The bottom section (Appearance, action buttons, preview) is packed
+        *before* the scrollable controls so tkinter reserves space for it
+        even when the window is at minimum height.
+        """
         style = ttk.Style(self)
         style.theme_use("clam")
 
-        # -- Global font shorthand --
-        _f = _FONT_FAMILY
-        _fn = (_f, 10)
-        _fb = (_f, 10, "bold")
-        _fs = (_f, 9)
+        _f   = _FONT_FAMILY
+        _fn  = (_f, 10)
+        _fb  = (_f, 10, "bold")
+        _fs  = (_f, 9)
         _fsi = (_f, 9, "italic")
-        _fh = (_f, 16, "bold")
+        _fh  = (_f, 16, "bold")
 
-        # -- Card frames --
+        # ttk style definitions
         style.configure("Card.TLabelframe",
-                        background=CLR_FRAME, borderwidth=1, relief="solid")
+                        background=C["frame"], borderwidth=1, relief="solid")
         style.configure("Card.TLabelframe.Label",
-                        background=CLR_FRAME, foreground=CLR_TEXT, font=_fb)
-
-        # -- Labels --
+                        background=C["frame"], foreground=C["text"], font=_fb)
         style.configure("TLabel",
-                        background=CLR_BG, foreground=CLR_TEXT, font=_fn)
+                        background=C["bg"], foreground=C["text"], font=_fn)
         style.configure("Header.TLabel",
-                        background=CLR_BG, foreground=CLR_TEXT, font=_fh)
+                        background=C["bg"], foreground=C["text"], font=_fh)
         style.configure("Sub.TLabel",
-                        background=CLR_BG, foreground=CLR_TEXT_LIGHT, font=_fs)
+                        background=C["bg"], foreground=C["text_light"], font=_fs)
         style.configure("Status.TLabel",
-                        background=CLR_BG, foreground=CLR_TEXT_LIGHT, font=_fsi)
-
-        # -- Radio buttons --
+                        background=C["bg"], foreground=C["text_light"], font=_fsi)
         style.configure("TRadiobutton",
-                        background=CLR_FRAME, foreground=CLR_TEXT, font=_fn)
-
-        # -- Combobox --
+                        background=C["frame"], foreground=C["text"], font=_fn)
         style.configure("TCombobox", font=_fn, padding=4)
-
-        # -- Entry --
-        style.configure("TEntry", font=_fn)
-
-        # -- Treeview (high contrast) --
+        style.configure("TEntry", font=_fn,
+                        fieldbackground=C["entry_bg"], foreground=C["text"])
         style.configure("Treeview",
-                        background=CLR_TREE_BG,
-                        foreground=CLR_TREE_FG,
-                        fieldbackground=CLR_TREE_BG,
-                        font=_fn,
-                        rowheight=24)
+                        background=C["tree_bg"], foreground=C["tree_fg"],
+                        fieldbackground=C["tree_bg"], font=_fn, rowheight=24)
         style.configure("Treeview.Heading",
-                        background=CLR_TREE_HEAD_BG,
-                        foreground=CLR_TREE_HEAD_FG,
-                        font=_fb,
-                        relief="flat",
-                        padding=4)
+                        background=C["tree_head_bg"],
+                        foreground=C["tree_head_fg"],
+                        font=_fb, relief="flat", padding=4)
         style.map("Treeview.Heading",
-                  background=[("active", "#94a3b8")])
+                  background=[("active", C["border"])])
         style.map("Treeview",
-                  background=[("selected", CLR_TREE_SEL)],
-                  foreground=[("selected", CLR_TREE_FG)])
-
-        # -- ttk.Button styles (work on macOS unlike tk.Button) --
-        for name, bg, bg_hv, fg in [
-            ("Primary.TButton", CLR_PRIMARY, CLR_PRIMARY_HV, "#ffffff"),
-            ("Success.TButton", CLR_SUCCESS, CLR_SUCCESS_HV, "#ffffff"),
-            ("Danger.TButton",  CLR_DANGER,  CLR_DANGER_HV,  "#ffffff"),
+                  background=[("selected", C["tree_sel"])],
+                  foreground=[("selected", C["tree_fg"])])
+        for btn_name, bg, hv, fg in [
+            ("Primary.TButton", C["primary"], C["primary_hv"], "#ffffff"),
+            ("Success.TButton", C["success"], C["success_hv"], "#ffffff"),
+            ("Danger.TButton",  C["danger"],  C["danger_hv"],  "#ffffff"),
         ]:
-            style.configure(name,
-                            background=bg, foreground=fg,
-                            font=(_f, 9, "bold"),
-                            padding=(14, 5), relief="flat", borderwidth=0)
-            style.map(name,
-                      background=[("active", bg_hv), ("pressed", bg_hv)],
+            style.configure(btn_name, background=bg, foreground=fg,
+                            font=(_f, 9, "bold"), padding=(14, 5),
+                            relief="flat", borderwidth=0)
+            style.map(btn_name,
+                      background=[("active", hv), ("pressed", hv)],
                       foreground=[("active", fg), ("pressed", fg)])
 
-        outer = tk.Frame(self, bg=CLR_BG)
-        outer.pack(fill="both", expand=True)
-        canvas = tk.Canvas(outer, bg=CLR_BG, highlightthickness=0)
-        sb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-        self.scroll_frame = tk.Frame(canvas, bg=CLR_BG)
-        self.scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        win_id = canvas.create_window((0, 0), window=self.scroll_frame, anchor="nw")
-        # Stretch inner frame to fill canvas width when window is resized.
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win_id, width=e.width))
-        canvas.configure(yscrollcommand=sb.set)
+        # ── Bottom panel (packed first to anchor at bottom) ───────────────
+        preview_outer = tk.Frame(self, bg=C["bg"])
+        preview_outer.pack(side="bottom", fill="x")
+
+        # Appearance section — not packed yet; revealed in _populate_tree.
+        af = ttk.LabelFrame(
+            preview_outer, text="  Appearance  ", style="Card.TLabelframe",
+        )
+        self._appearance_frame = af  # pack deferred until first extraction
+        inner = tk.Frame(af, bg=C["frame"])
+        inner.pack(fill="x", padx=12, pady=6)
+
+        tk.Label(inner, text="Background:", bg=C["frame"],
+                 font=(_f, 10), fg=C["text"]).grid(
+            row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Radiobutton(inner, text="Light",
+                        variable=self.bg_var, value="white").grid(
+            row=0, column=1, padx=(0, 8))
+        ttk.Radiobutton(inner, text="Dark",
+                        variable=self.bg_var, value="black").grid(
+            row=0, column=2, padx=(0, 24))
+        tk.Label(inner, text="Palette:", bg=C["frame"],
+                 font=(_f, 10), fg=C["text"]).grid(
+            row=0, column=3, sticky="w", padx=(0, 8))
+
+        palettes = [
+            "turbo \u2014 Vibrant",   "gray \u2014 Mono",
+            "ocean \u2014 Ocean",     "hot \u2014 Hot",
+            "rainbow \u2014 Rainbow", "viridis \u2014 Viridis",
+            "plasma \u2014 Plasma",   "inferno \u2014 Inferno",
+        ]
+        combo_pal = ttk.Combobox(inner, values=palettes,
+                                 state="readonly", width=20)
+        combo_pal.current(0)
+        combo_pal.grid(row=0, column=4)
+        combo_pal.bind(
+            "<<ComboboxSelected>>",
+            lambda e: self.palette_var.set(
+                combo_pal.get().split(" \u2014 ")[0].strip()
+            ),
+        )
+
+        tk.Label(inner, text="Separator:", bg=C["frame"],
+                 font=(_f, 10), fg=C["text"]).grid(
+            row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+        ttk.Radiobutton(inner, text="Underscore  (Data_Science)",
+                        variable=self.separator_var, value="_").grid(
+            row=1, column=1, columnspan=2, sticky="w",
+            padx=(0, 8), pady=(8, 0))
+        ttk.Radiobutton(inner, text="Space  (Data Science)",
+                        variable=self.separator_var, value=" ").grid(
+            row=1, column=3, sticky="w", padx=(0, 8), pady=(8, 0))
+        tk.Label(
+            inner,
+            text="Affects both the treeview and the word cloud output.",
+            bg=C["frame"], fg=C["text_light"], font=(_f, 8, "italic"),
+        ).grid(row=2, column=0, columnspan=5, sticky="w",
+               padx=(0, 8), pady=(2, 4))
+
+        # Action buttons row
+        bf = tk.Frame(preview_outer, bg=C["bg"])
+        bf.pack(fill="x", padx=24, pady=(8, 4))
+        self._action_buttons_frame = bf
+        self._btn(bf, "Generate Word Cloud",
+                  self._run_generate, C["primary"], width=22).pack(
+            side="left", padx=(0, 8))
+        self._btn(bf, "Save As \u2026",
+                  self._save_as, C["primary"], width=14).pack(
+            side="left", padx=(0, 8))
+        self._btn(bf, "Export Terms (.txt)",
+                  self._export_terms, C["primary"], width=18).pack(side="left")
+
+        # Preview image
+        pf = ttk.LabelFrame(preview_outer, text="  Preview  ",
+                            style="Card.TLabelframe")
+        pf.pack(fill="x", padx=24, pady=(0, 12))
+        self.preview_label = tk.Label(
+            pf, bg=C["frame"],
+            text="Word cloud will appear here.",
+            fg=C["text_light"], font=(_FONT_FAMILY, 10, "italic"),
+            height=8,
+        )
+        self.preview_label.pack(fill="x", padx=8, pady=8)
+
+        # ── Scrollable upper area ─────────────────────────────────────────
+        scroll_outer = tk.Frame(self, bg=C["bg"])
+        scroll_outer.pack(side="top", fill="both", expand=True)
+
+        canvas = tk.Canvas(scroll_outer, bg=C["bg"], highlightthickness=0)
+        vsb    = ttk.Scrollbar(scroll_outer, orient="vertical",
+                               command=canvas.yview)
+        self.scroll_frame = tk.Frame(canvas, bg=C["bg"])
+        self.scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        win_id = canvas.create_window((0, 0), window=self.scroll_frame,
+                                      anchor="nw")
+        canvas.bind(
+            "<Configure>",
+            lambda e: canvas.itemconfig(win_id, width=e.width),
+        )
+        canvas.configure(yscrollcommand=vsb.set)
         canvas.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
-        # Cross-platform scroll: macOS sends delta in different units.
-        def _on_scroll(event):
+        vsb.pack(side="right", fill="y")
+
+        def _on_scroll(event: tk.Event) -> None:
+            """Handle mousewheel scroll on macOS/Windows and X11 Linux."""
             if sys.platform == "darwin":
                 canvas.yview_scroll(-event.delta, "units")
             else:
                 canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_scroll)
 
-        c = tk.Frame(self.scroll_frame, bg=CLR_BG)
+        canvas.bind_all("<MouseWheel>", _on_scroll)
+        # X11 Linux fires Button-4/5 instead of MouseWheel.
+        canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+        canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll( 1, "units"))
+
+        c = tk.Frame(self.scroll_frame, bg=C["bg"])
         c.pack(fill="both", expand=True, padx=24, pady=12)
 
-        ttk.Label(c, text="LinkedIn Banner Word Cloud Generator", style="Header.TLabel").pack(anchor="w", pady=(0, 2))
-        ttk.Label(c, text="Multilingual \u00b7 Offline \u00b7 NLP-Powered", style="Sub.TLabel").pack(anchor="w", pady=(0, 16))
+        # Header row: title + Settings button
+        hdr = tk.Frame(c, bg=C["bg"])
+        hdr.pack(fill="x", pady=(0, 2))
+        ttk.Label(hdr, text="LinkedIn Banner Word Cloud Generator",
+                  style="Header.TLabel").pack(side="left", anchor="w")
+        ttk.Button(hdr, text="\u2699  Settings",
+                   style="Primary.TButton",
+                   command=self._open_settings,
+                   cursor="hand2").pack(side="right")
 
-        # File section.
-        f = tk.Frame(c, bg=CLR_BG)
-        f.pack(fill="x", pady=(0, 4))
-        self.file_var = tk.StringVar(value="No file selected")
-        ttk.Label(f, textvariable=self.file_var).pack(side="left", fill="x", expand=True)
-        self._btn(f, "Browse \u2026", self._browse_file, CLR_PRIMARY).pack(side="right", padx=(8, 0))
-        self._btn(f, "Analyse Resume", self._run_extraction, CLR_SUCCESS).pack(side="right", padx=(8, 0))
+        self._provider_label_var = tk.StringVar()
+        ttk.Label(c, textvariable=self._provider_label_var,
+                  style="Sub.TLabel").pack(anchor="w", pady=(0, 10))
+
+        # File selection row — buttons anchored right so long filenames
+        # truncate in the label rather than pushing buttons off-screen.
+        file_outer = tk.Frame(c, bg=C["bg"])
+        file_outer.pack(fill="x", pady=(0, 4))
+
+        btn_frame = tk.Frame(file_outer, bg=C["bg"])
+        btn_frame.pack(side="right")
+        self._btn(btn_frame, "Analyse Resume",
+                  self._run_extraction, C["success"]).pack(
+            side="right", padx=(8, 0))
+        self._btn(btn_frame, "Browse \u2026",
+                  self._browse_file, C["primary"]).pack(
+            side="right", padx=(8, 0))
+
+        self.file_display_var = tk.StringVar(value="No file selected")
+        ttk.Label(file_outer, textvariable=self.file_display_var).pack(
+            side="left", fill="x", expand=True, padx=(0, 8))
 
         self.status_var = tk.StringVar(value="Ready \u2014 select a resume file.")
-        ttk.Label(c, textvariable=self.status_var, style="Status.TLabel").pack(anchor="w", pady=(4, 8))
+        ttk.Label(c, textvariable=self.status_var,
+                  style="Status.TLabel").pack(anchor="w", pady=(4, 8))
 
-        # Term table.
-        lf = ttk.LabelFrame(c, text="  Extracted Terms  ", style="Card.TLabelframe")
+        # Extracted terms treeview
+        lf = ttk.LabelFrame(c, text="  Extracted Terms  ",
+                            style="Card.TLabelframe")
         lf.pack(fill="both", expand=True, pady=(0, 8))
         cols = ("term", "weight", "bar")
-        self.tree = ttk.Treeview(lf, columns=cols, show="headings", height=18)
-        self.tree.heading("term", text="Term ▽", command=lambda: self._sort_by("term"))
-        self.tree.heading("weight", text="▼ Weight", command=lambda: self._sort_by("weight"))
-        self.tree.heading("bar", text="Relative")
-        self.tree.column("term", width=280, anchor="w"); self.tree.column("weight", width=80, anchor="e"); self.tree.column("bar", width=200, anchor="w")
-        vsb = ttk.Scrollbar(lf, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
-        vsb.pack(side="right", fill="y", padx=(0, 8), pady=8)
+        self.tree = ttk.Treeview(lf, columns=cols, show="headings", height=12)
+        self.tree.heading("term",   text="Term \u25bd",
+                          command=lambda: self._sort_by("term"))
+        self.tree.heading("weight", text="\u25bc Weight",
+                          command=lambda: self._sort_by("weight"))
+        self.tree.heading("bar",    text="Relative")
+        self.tree.column("term",   width=280, anchor="w")
+        self.tree.column("weight", width=80,  anchor="e")
+        self.tree.column("bar",    width=200, anchor="w")
+        tree_vsb = ttk.Scrollbar(lf, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tree_vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True,
+                       padx=(8, 0), pady=8)
+        tree_vsb.pack(side="right", fill="y", padx=(0, 8), pady=8)
 
-        # Edit section.
-        ef = tk.Frame(c, bg=CLR_BG)
+        # Term editing controls
+        ef = tk.Frame(c, bg=C["bg"])
         ef.pack(fill="x", pady=(0, 8))
-        # Row 0: Remove selected + Add term.
-        self._btn(ef, "\u2212 Remove Selected", self._remove_selected, CLR_DANGER).grid(row=0, column=0, padx=(0, 16))
-        tk.Label(ef, text="Add term:", bg=CLR_BG, font=(_FONT_FAMILY, 10), fg=CLR_TEXT).grid(row=0, column=1, sticky="w", padx=(0, 6))
-        self.add_entry = ttk.Entry(ef, width=26)
+
+        self._btn(ef, "\u2212 Remove Selected",
+                  self._remove_selected, C["danger"]).grid(
+            row=0, column=0, padx=(0, 16))
+        tk.Label(ef, text="Add term:", bg=C["bg"],
+                 font=(_f, 10), fg=C["text"]).grid(
+            row=0, column=1, sticky="w", padx=(0, 6))
+        self.add_entry = tk.Entry(
+            ef, width=26,
+            bg=C["entry_bg"], fg=C["text"],
+            insertbackground=C["text"],
+            relief="flat",
+            highlightbackground=C["border"], highlightthickness=1,
+            font=(_f, 10),
+        )
         self.add_entry.grid(row=0, column=2, padx=(0, 6))
-        self._btn(ef, "+ Add", self._add_term, CLR_SUCCESS).grid(row=0, column=3)
-        # Row 1: Runner-up promotion.
-        tk.Label(ef, text="Runner-ups:", bg=CLR_BG, font=(_FONT_FAMILY, 10), fg=CLR_TEXT).grid(row=1, column=0, sticky="w", padx=(0, 6), pady=(8, 0))
+        self._btn(ef, "+ Add", self._add_term, C["success"]).grid(
+            row=0, column=3)
+
+        tk.Label(ef, text="Runner-ups:", bg=C["bg"],
+                 font=(_f, 10), fg=C["text"]).grid(
+            row=1, column=0, sticky="w", padx=(0, 6), pady=(8, 0))
         self.runner_combo = ttk.Combobox(ef, state="readonly", width=30)
-        self.runner_combo.grid(row=1, column=1, columnspan=2, sticky="w", padx=(0, 6), pady=(8, 0))
-        self._btn(ef, "\u2191 Promote", self._promote_runner, CLR_PRIMARY).grid(row=1, column=3, pady=(8, 0))
-
-        # Appearance.
-        af = ttk.LabelFrame(c, text="  Appearance  ", style="Card.TLabelframe")
-        af.pack(fill="x", pady=(0, 8))
-        inner = tk.Frame(af, bg=CLR_FRAME)
-        inner.pack(fill="x", padx=12, pady=8)
-
-        # Row 0: Background + Palette.
-        tk.Label(inner, text="Background:", bg=CLR_FRAME, font=(_FONT_FAMILY, 10), fg=CLR_TEXT).grid(row=0, column=0, sticky="w", padx=(0, 8))
-        ttk.Radiobutton(inner, text="Light", variable=self.bg_var, value="white").grid(row=0, column=1, padx=(0, 8))
-        ttk.Radiobutton(inner, text="Dark", variable=self.bg_var, value="black").grid(row=0, column=2, padx=(0, 24))
-        tk.Label(inner, text="Palette:", bg=CLR_FRAME, font=(_FONT_FAMILY, 10), fg=CLR_TEXT).grid(row=0, column=3, sticky="w", padx=(0, 8))
-        pals = ["turbo \u2014 Vibrant", "gray \u2014 Mono", "ocean \u2014 Ocean", "hot \u2014 Hot",
-                "rainbow \u2014 Rainbow", "viridis \u2014 Viridis", "plasma \u2014 Plasma", "inferno \u2014 Inferno"]
-        combo_pal = ttk.Combobox(inner, values=pals, state="readonly", width=20)
-        combo_pal.current(0)
-        combo_pal.grid(row=0, column=4)
-        combo_pal.bind("<<ComboboxSelected>>", lambda e: self.palette_var.set(combo_pal.get().split(" \u2014 ")[0].strip()))
-
-        # Row 1: Separator + Language.
-        tk.Label(inner, text="Separator:", bg=CLR_FRAME, font=(_FONT_FAMILY, 10), fg=CLR_TEXT).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
-        ttk.Radiobutton(inner, text="Underscore (Data_Science)", variable=self.separator_var, value="_").grid(row=1, column=1, columnspan=2, sticky="w", padx=(0, 8), pady=(8, 0))
-        ttk.Radiobutton(inner, text="Space (Data Science)", variable=self.separator_var, value=" ").grid(row=1, column=3, sticky="w", padx=(0, 24), pady=(8, 0))
-
-        tk.Label(inner, text="Language:", bg=CLR_FRAME, font=(_FONT_FAMILY, 10), fg=CLR_TEXT).grid(row=1, column=4, sticky="e", padx=(16, 8), pady=(8, 0))
-        langs = [
-            "auto \u2014 Detect automatically",
-            "en \u2014 English", "es \u2014 Espa\u00f1ol", "fr \u2014 Fran\u00e7ais",
-            "de \u2014 Deutsch", "pt \u2014 Portugu\u00eas", "it \u2014 Italiano",
-            "nl \u2014 Nederlands", "ca \u2014 Catal\u00e0",
-            "ru \u2014 \u0420\u0443\u0441\u0441\u043a\u0438\u0439",
-            "pl \u2014 Polski", "sv \u2014 Svenska", "tr \u2014 T\u00fcrk\u00e7e",
-            "zh-cn \u2014 \u4e2d\u6587 (simplified)", "zh-tw \u2014 \u4e2d\u6587 (traditional)",
-            "ja \u2014 \u65e5\u672c\u8a9e", "ko \u2014 \ud55c\uad6d\uc5b4",
-            "ar \u2014 \u0627\u0644\u0639\u0631\u0628\u064a\u0629",
-            "hi \u2014 \u0939\u093f\u0928\u094d\u0926\u0940",
-        ]
-        combo_lang = ttk.Combobox(inner, values=langs, state="readonly", width=24)
-        combo_lang.current(0)
-        combo_lang.grid(row=1, column=5, sticky="w", pady=(8, 0))
-        combo_lang.bind("<<ComboboxSelected>>", lambda e: self.lang_var.set(combo_lang.get().split(" \u2014 ")[0].strip()))
-        inner.columnconfigure(5, weight=1)
-
-        # Actions.
-        bf = tk.Frame(c, bg=CLR_BG)
-        bf.pack(fill="x", pady=(0, 8))
-        self._btn(bf, "Generate Word Cloud", self._run_generate, CLR_PRIMARY, width=22).pack(side="left", padx=(0, 8))
-        self._btn(bf, "Save As \u2026", self._save_as, CLR_PRIMARY, width=14).pack(side="left", padx=(0, 8))
-        self._btn(bf, "Export Terms (.txt)", self._export_terms, CLR_PRIMARY, width=18).pack(side="left")
-
-        # Preview.
-        pf = ttk.LabelFrame(c, text="  Preview  ", style="Card.TLabelframe")
-        pf.pack(fill="both", expand=True, pady=(0, 16))
-        self.preview_label = tk.Label(pf, bg=CLR_FRAME, text="Word cloud will appear here.", fg=CLR_TEXT_LIGHT, font=(_FONT_FAMILY, 10, "italic"))
-        self.preview_label.pack(fill="both", expand=True, padx=8, pady=8)
+        self.runner_combo.grid(row=1, column=1, columnspan=2,
+                               sticky="w", padx=(0, 6), pady=(8, 0))
+        self._btn(ef, "\u2191 Promote",
+                  self._promote_runner, C["primary"]).grid(
+            row=1, column=3, pady=(8, 0))
 
     @staticmethod
-    def _btn(parent, text, command, colour, width=None):
-        """Create a ttk.Button with the matching colour style."""
+    def _btn(
+        parent: tk.Widget,
+        text: str,
+        command,
+        colour: str,
+        width: int | None = None,
+    ) -> ttk.Button:
+        """Create and return a themed ``ttk.Button``.
+
+        Maps *colour* (a hex string from ``C``) to the matching ttk style.
+        """
         style_map = {
-            CLR_PRIMARY: "Primary.TButton",
-            CLR_DANGER:  "Danger.TButton",
-            CLR_SUCCESS: "Success.TButton",
+            C["primary"]: "Primary.TButton",
+            C["danger"]:  "Danger.TButton",
+            C["success"]: "Success.TButton",
         }
-        sty = style_map.get(colour, "Primary.TButton")
-        kw = dict(text=text, command=command, style=sty, cursor="hand2")
-        if width:
-            kw["width"] = width
-        return ttk.Button(parent, **kw)
+        kwargs: dict = dict(
+            text=text,
+            command=command,
+            style=style_map.get(colour, "Primary.TButton"),
+            cursor="hand2",
+        )
+        if width is not None:
+            kwargs["width"] = width
+        return ttk.Button(parent, **kwargs)
 
-    # -- Actions --
+    # ── State / provider helpers ──────────────────────────────────────────
 
-    def _browse_file(self):
+    def _refresh_provider_label(self) -> None:
+        """Update the subtitle label to show the active provider name."""
+        config = load_config()
+        name   = config.get("active_provider", "")
+        if name:
+            self._provider_label_var.set(
+                f"AI Provider: {name}  \u00b7  "
+                "change anytime via \u2699 Settings"
+            )
+        else:
+            self._provider_label_var.set(
+                "\u26a0  No provider configured \u2014 "
+                "click \u2699 Settings to add an API key."
+            )
+
+    def _open_settings(self) -> None:
+        """Open the Settings dialog."""
+        SettingsDialog(self)
+
+    def _browse_file(self) -> None:
+        """Open a file picker restricted to supported document types."""
         path = filedialog.askopenfilename(
             title="Select Resume / CV",
             initialdir=str(_downloads_folder()),
-            filetypes=[("All supported", "*.pdf *.docx *.txt"), ("PDF", "*.pdf"), ("Word", "*.docx"), ("Text", "*.txt")])
-        if path:
-            self.file_var.set(path)
+            filetypes=[
+                ("Supported documents", "*.pdf *.docx *.txt"),
+                ("PDF",        "*.pdf"),
+                ("Word",       "*.docx"),
+                ("Plain text", "*.txt"),
+            ],
+        )
+        if not path:
+            return
+        if Path(path).suffix.lower() not in self._SUPPORTED_EXTENSIONS:
+            messagebox.showerror(
+                "Unsupported file type",
+                f"'{Path(path).name}' is not a supported document type.\n\n"
+                "Please select a PDF, Word (.docx), or plain text (.txt) file.",
+            )
+            return
+        self._file_path = path
+        self.file_display_var.set(_shorten_path(path))
+        self._set_status(f"Selected: {path}")
 
-    def _set_status(self, msg):
+    def _set_status(self, msg: str) -> None:
+        """Update the status label and flush pending UI events."""
         self.status_var.set(msg)
         self.update_idletasks()
 
-    def _populate_tree(self):
+    def _on_separator_change(self, *_) -> None:
+        """Re-format all stored terms to use the newly chosen separator.
+
+        Called automatically by the ``trace_add`` on ``separator_var``
+        whenever the user clicks a separator radio button. Splits each term
+        on any existing separator (``_`` or space) and rejoins with the
+        new one — no re-extraction needed.
+        """
+        sep = self.separator_var.get()
+        with self._lock:
+            if not self.terms and not self.runner_ups:
+                return
+
+            def _reformat(d: dict[str, int]) -> dict[str, int]:
+                return {
+                    sep.join(p for p in re.split(r"[ _]+", term) if p): w
+                    for term, w in d.items()
+                }
+
+            self.terms      = _reformat(self.terms)
+            self.runner_ups = _reformat(self.runner_ups)
+
+        self._populate_tree()
+        self._populate_runners()
+
+    # ── Treeview management ───────────────────────────────────────────────
+
+    def _populate_tree(self) -> None:
+        """Rebuild the treeview from ``self.terms``.
+
+        Also reveals the Appearance section the first time terms exist.
+        """
         for row in self.tree.get_children():
             self.tree.delete(row)
         if not self.terms:
             return
-        mx = max(self.terms.values())
-        # Sort according to current sort state.
-        if self._sort_col == "term":
-            ordered = sorted(self.terms.items(),
-                             key=lambda x: x[0].lower(),
-                             reverse=self._sort_reverse)
-        else:  # weight
-            ordered = sorted(self.terms.items(),
-                             key=lambda x: x[1],
-                             reverse=self._sort_reverse)
-        for t, w in ordered:
-            bar = "\u2588" * (int((w / mx) * 20) if mx else 0)
-            self.tree.insert("", "end", values=(t, w, bar))
 
-    def _sort_by(self, col):
-        """Toggle sort column/direction and update heading indicators."""
+        # Reveal the Appearance panel the first time we have terms.
+        if (
+            self._appearance_frame is not None
+            and not self._appearance_frame.winfo_ismapped()
+        ):
+            self._appearance_frame.pack(
+                fill="x", padx=24, pady=(8, 4),
+                before=self._action_buttons_frame,
+            )
+
+        mx = max(self.terms.values())
+        if self._sort_col == "term":
+            ordered = sorted(
+                self.terms.items(),
+                key=lambda kv: kv[0].lower(),
+                reverse=self._sort_reverse,
+            )
+        else:
+            ordered = sorted(
+                self.terms.items(),
+                key=lambda kv: kv[1],
+                reverse=self._sort_reverse,
+            )
+
+        for term, weight in ordered:
+            bar = "\u2588" * (int((weight / mx) * 20) if mx else 0)
+            self.tree.insert("", "end", values=(term, weight, bar))
+
+    def _sort_by(self, col: str) -> None:
+        """Toggle sort order on *col* and refresh the treeview."""
         if self._sort_col == col:
             self._sort_reverse = not self._sort_reverse
         else:
-            self._sort_col = col
-            self._sort_reverse = col == "weight"   # weight defaults desc, term defaults asc
-        # Update heading text with arrow indicators.
-        arrow_dn, arrow_up = "\u25bc", "\u25b2"   # ▼ ▲
-        no_arrow = "\u25bd"                        # ▽ (inactive)
+            self._sort_col     = col
+            self._sort_reverse = col == "weight"  # weight defaults desc
+
+        dn, up, no = "\u25bc", "\u25b2", "\u25bd"
         if self._sort_col == "term":
-            t_arrow = arrow_dn if self._sort_reverse else arrow_up
-            self.tree.heading("term", text=f"{t_arrow} Term")
-            self.tree.heading("weight", text=f"Weight {no_arrow}")
+            self.tree.heading(
+                "term",
+                text=f"{dn if self._sort_reverse else up} Term",
+            )
+            self.tree.heading("weight", text=f"Weight {no}")
         else:
-            w_arrow = arrow_dn if self._sort_reverse else arrow_up
-            self.tree.heading("term", text=f"Term {no_arrow}")
-            self.tree.heading("weight", text=f"{w_arrow} Weight")
+            self.tree.heading("term", text=f"Term {no}")
+            self.tree.heading(
+                "weight",
+                text=f"{dn if self._sort_reverse else up} Weight",
+            )
         self._populate_tree()
 
-    def _run_extraction(self):
-        path = self.file_var.get()
-        if not path or path == "No file selected":
+    # ── Extraction ────────────────────────────────────────────────────────
+
+    def _run_extraction(self) -> None:
+        """Validate inputs then kick off a background extraction thread."""
+        if not self._file_path:
             messagebox.showwarning("No file", "Select a resume first.")
             return
-        log.info("--- Extraction started: %s ---", path)
+
+        if Path(self._file_path).suffix.lower() not in self._SUPPORTED_EXTENSIONS:
+            messagebox.showerror(
+                "Unsupported file type",
+                f"'{Path(self._file_path).name}' cannot be processed.\n\n"
+                "Supported: PDF (.pdf), Word (.docx), plain text (.txt).",
+            )
+            return
+
+        config        = load_config()
+        provider_name = config.get("active_provider", "")
+        api_key       = config.get("keys", {}).get(provider_name, "")
+
+        if not provider_name or not api_key:
+            messagebox.showwarning(
+                "No provider",
+                "No AI provider configured.\n\n"
+                "Click \u2699 Settings to add an API key first.",
+            )
+            self._open_settings()
+            return
+
+        log.info("Extraction started: %s (provider: %s)",
+                 self._file_path, provider_name)
         self._set_status("Reading file \u2026")
 
-        def _worker():
+        def _worker() -> None:
             try:
-                self.resume_text = extract_text_from_file(path)
-                self._set_status(f"{len(self.resume_text):,} chars.  Validating \u2026")
+                self.resume_text = extract_text_from_file(self._file_path)
+                n = len(self.resume_text)
+                self.after(0, self._set_status,
+                           f"{n:,} chars read.  Validating \u2026")
 
-                ok, conf, sigs, wrns = validate_resume(self.resume_text)
-                pct = int(conf * 100)
-
+                ok, reason = _validate_content(self.resume_text)
                 if not ok:
-                    log.info("Validation failed (%d%%), asking user", pct)
-                    rpt = self._fmt_report(sigs, wrns)
-                    proceed = tk.BooleanVar(value=False)
-                    evt = threading.Event()
-                    def _ask():
-                        proceed.set(messagebox.askyesno(
-                            "Document Validation",
-                            f"Doesn\u2019t look like a resume ({pct}%).\n\n{rpt}\n\nProceed anyway?"))
-                        evt.set()
-                    self.after(0, _ask); evt.wait()
-                    if not proceed.get():
-                        log.info("User cancelled after validation failure")
-                        self.after(0, self._set_status, "Cancelled."); return
-                elif conf < 0.65:
-                    self.after(0, self._set_status, f"Probably a resume ({pct}%).  Proceeding \u2026")
-                else:
-                    self.after(0, self._set_status, f"Validated ({pct}%).  Running NLP \u2026")
+                    # Ask the user before wasting an API call on bad content.
+                    evt     = threading.Event()
+                    proceed = {"v": False}
 
-                lang_choice = self.lang_var.get()
-                sep = self.separator_var.get()
-                log.info("Settings: lang=%s, separator='%s'", lang_choice, sep)
-                terms, runner_ups, lang, model = extract_terms(
+                    def _ask(r: str = reason) -> None:
+                        proceed["v"] = messagebox.askyesno(
+                            "Content Warning",
+                            f"{r}\n\nSend to AI anyway?",
+                        )
+                        evt.set()
+
+                    self.after(0, _ask)
+                    evt.wait()
+                    if not proceed["v"]:
+                        self.after(0, self._set_status, "Cancelled.")
+                        return
+
+                self.after(0, self._set_status,
+                           f"{n:,} chars.  Sending to {provider_name} \u2026")
+
+                provider = get_provider(provider_name, api_key)
+                terms, runner_ups, lang, model = extract_terms_ai(
                     self.resume_text,
-                    progress_callback=lambda m: self.after(0, self._set_status, m),
-                    lang_override=None if lang_choice == "auto" else lang_choice,
-                    separator=sep,
+                    provider=provider,
+                    separator=self.separator_var.get(),
+                    progress_callback=lambda m: self.after(
+                        0, self._set_status, m
+                    ),
                 )
                 with self._lock:
                     self.terms, self.runner_ups = terms, runner_ups
-                    self.user_excluded = set()  # fresh extraction → reset
-                self.detected_lang, self.spacy_model = lang, model
+                    self.user_excluded = set()
+                self.detected_lang = lang
                 self.after(0, self._populate_tree)
                 self.after(0, self._populate_runners)
-                self.after(0, self._set_status, f"Done \u2014 {len(terms)} terms, {len(runner_ups)} runner-ups (lang: {lang}, model: {model})")
+                self.after(
+                    0, self._set_status,
+                    f"Done \u2014 {len(terms)} terms, "
+                    f"{len(runner_ups)} runner-ups  (provider: {model})",
+                )
             except Exception as exc:
                 log.error("Extraction failed: %s", exc, exc_info=True)
                 self.after(0, lambda: messagebox.showerror("Error", str(exc)))
                 self.after(0, self._set_status, "Error.")
+
         threading.Thread(target=_worker, daemon=True).start()
 
-    @staticmethod
-    def _fmt_report(signals, warnings_list):
-        parts = []
-        if signals:
-            parts.append("Positive signals:")
-            parts.extend(f"  \u2713 {s}" for s in signals)
-        if warnings_list:
-            if parts: parts.append("")
-            parts.append("Concerns:")
-            parts.extend(f"  \u26a0 {w}" for w in warnings_list)
-        return "\n".join(parts)
+    # ── Term editing ──────────────────────────────────────────────────────
 
-    def _add_term(self):
+    def _add_term(self) -> None:
+        """Add one or more comma-separated terms from the entry field."""
         raw = self.add_entry.get().strip()
-        if not raw: return
+        if not raw:
+            return
         sep = self.separator_var.get()
         with self._lock:
-            for p in raw.split(","):
-                c = clean_term(p.strip(), self.detected_lang, sep)
-                if c:
-                    self.terms[c] = MANUAL_ADD_WEIGHT
-                    self.user_excluded.discard(c)
-                    log.debug("Manual add: '%s' (weight=%d)", c, MANUAL_ADD_WEIGHT)
+            for part in raw.split(","):
+                cleaned = clean_term(part.strip(), separator=sep)
+                if cleaned:
+                    self.terms[cleaned] = MANUAL_ADD_WEIGHT
+                    self.user_excluded.discard(cleaned)
         self.add_entry.delete(0, "end")
         self._populate_tree()
 
-    def _remove_selected(self):
-        """Remove highlighted rows; auto-backfill from runner-ups."""
+    def _remove_selected(self) -> None:
+        """Remove highlighted rows and auto-backfill from runner-ups."""
         sel = self.tree.selection()
         if not sel:
-            messagebox.showinfo("Nothing selected", "Click a term in the table first.")
+            messagebox.showinfo("Nothing selected",
+                                "Click a term in the table first.")
             return
         with self._lock:
             for iid in sel:
                 term = self.tree.item(iid, "values")[0]
                 self.terms.pop(term, None)
                 self.user_excluded.add(term)
-                log.debug("Removed → excluded: '%s'", term)
 
-            # Auto-backfill: pull top runner-ups to keep count at MAX_TERMS.
+            # Refill gaps with the highest-weight eligible runner-up.
             while len(self.terms) < MAX_TERMS and self.runner_ups:
-                # Find highest-weight runner-up not in user_excluded.
                 best_term, best_w = None, -1
                 for t, w in self.runner_ups.items():
                     if t not in self.user_excluded and w > best_w:
@@ -1374,16 +1704,15 @@ class WordCloudApp(tk.Tk):
                     break
                 self.terms[best_term] = best_w
                 del self.runner_ups[best_term]
-                log.debug("Auto-backfilled: '%s' (%d)", best_term, best_w)
+
         self._populate_tree()
         self._populate_runners()
 
-    def _promote_runner(self):
-        """Move the selected runner-up into the main term list."""
+    def _promote_runner(self) -> None:
+        """Move the selected runner-up into the main terms list."""
         sel = self.runner_combo.get()
         if not sel:
             return
-        # Parse "Term (weight)" format.
         match = re.match(r"^(.+?)\s*\((\d+)\)$", sel)
         if match:
             term, weight = match.group(1), int(match.group(2))
@@ -1392,96 +1721,162 @@ class WordCloudApp(tk.Tk):
         with self._lock:
             self.terms[term] = weight
             self.runner_ups.pop(term, None)
-            self.user_excluded.discard(term)   # un-exclude if re-promoted
-        log.debug("Promoted runner-up: '%s' (%d)", term, weight)
+            self.user_excluded.discard(term)
         self._populate_tree()
         self._populate_runners()
 
-    def _populate_runners(self):
-        """Refresh the runner-up combobox, excluding user-removed terms."""
-        items = [f"{t} ({w})" for t, w in
-                 sorted(self.runner_ups.items(), key=lambda x: x[1], reverse=True)
-                 if t not in self.user_excluded]
+    def _populate_runners(self) -> None:
+        """Refresh the runner-up combobox, hiding user-excluded terms."""
+        items = [
+            f"{t} ({w})"
+            for t, w in sorted(
+                self.runner_ups.items(), key=lambda kv: kv[1], reverse=True
+            )
+            if t not in self.user_excluded
+        ]
         self.runner_combo["values"] = items
         if items:
             self.runner_combo.current(0)
         else:
             self.runner_combo.set("")
 
-    def _run_generate(self):
+    # ── Generation + file I/O ─────────────────────────────────────────────
+
+    def _run_generate(self) -> None:
+        """Render the word cloud to a temp file in a background thread."""
         if not self.terms:
             messagebox.showwarning("No terms", "Analyse a resume first.")
             return
-        log.info("--- Generation started: %d terms, bg=%s, palette=%s ---",
+        log.info("Generation started: %d terms, bg=%s, palette=%s",
                  len(self.terms), self.bg_var.get(), self.palette_var.get())
         self._set_status("Generating \u2026")
-        def _worker():
+
+        def _worker() -> None:
             try:
-                out = generate_wordcloud(
-                    self.terms, background_color=self.bg_var.get(),
+                # Write to a temp file so nothing lands in Downloads until
+                # the user explicitly clicks Save As.
+                fd, tmp = tempfile.mkstemp(
+                    suffix=".png", prefix="linkedin_banner_"
+                )
+                os.close(fd)
+
+                generate_wordcloud(
+                    self.terms,
+                    background_color=self.bg_var.get(),
                     colormap=self.palette_var.get(),
-                    output_path=str(_downloads_folder() / "linkedin_banner.png"),
-                    lang=self.detected_lang)
-                mb = os.path.getsize(out) / (1024 * 1024)
-                self.after(0, self._show_preview, out)
-                self.after(0, self._set_status, f"Saved: {out}  ({mb:.2f} MB)")
+                    output_path=tmp,
+                    lang=self.detected_lang,
+                )
+
+                # Delete the previous temp file once the new one is ready.
+                old = self._temp_banner_path
+                self._temp_banner_path = tmp
+                if old and old != tmp:
+                    try:
+                        os.unlink(old)
+                    except OSError:
+                        pass
+
+                mb = os.path.getsize(tmp) / (1024 * 1024)
+                self.after(0, self._show_preview, tmp)
+                self.after(
+                    0, self._set_status,
+                    f"Ready to save  ({mb:.2f} MB) \u2014 "
+                    "click Save As \u2026 to keep it",
+                )
             except Exception as exc:
                 log.error("Generation failed: %s", exc, exc_info=True)
                 self.after(0, lambda: messagebox.showerror("Error", str(exc)))
                 self.after(0, self._set_status, "Error.")
+
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _show_preview(self, path):
+    def _show_preview(self, path: str) -> None:
+        """Load *path* into the preview label, scaled to fit the panel."""
         img = Image.open(path)
-        mw = max(600, self.winfo_width() - 80)
-        img = img.resize((mw, int(img.height * mw / img.width)), Image.LANCZOS)
+        self.preview_label.update_idletasks()
+        avail_w = max(600, self.preview_label.winfo_width() - 16)
+        new_h   = int(img.height * avail_w / img.width)
+        img = img.resize((avail_w, new_h), Image.LANCZOS)
         self.preview_image = ImageTk.PhotoImage(img)
-        self.preview_label.configure(image=self.preview_image, text="")
+        self.preview_label.configure(
+            image=self.preview_image, text="", height=new_h,
+        )
 
-    def _save_as(self):
-        src = str(_downloads_folder() / "linkedin_banner.png")
-        if not os.path.isfile(src):
-            messagebox.showwarning("No banner", "Generate one first."); return
+    def _save_as(self) -> None:
+        """Copy the temp banner PNG to a user-chosen destination."""
+        if not self._temp_banner_path or \
+                not os.path.isfile(self._temp_banner_path):
+            messagebox.showwarning("No banner", "Generate a word cloud first.")
+            return
         dest = filedialog.asksaveasfilename(
-            defaultextension=".png", filetypes=[("PNG", "*.png")],
+            title="Save LinkedIn Banner",
+            defaultextension=".png",
+            filetypes=[("PNG image", "*.png")],
             initialfile="linkedin_banner.png",
-            initialdir=str(_downloads_folder()))
+            initialdir=str(_downloads_folder()),
+        )
         if dest:
-            import shutil; shutil.copy2(src, dest)
-            log.info("Saved copy: %s", dest)
+            shutil.copy2(self._temp_banner_path, dest)
+            log.info("Saved to: %s", dest)
             self._set_status(f"Saved to: {dest}")
 
-    def _export_terms(self):
+    def _on_close(self) -> None:
+        """Delete the temp banner file (if any) then destroy the window."""
+        if self._temp_banner_path:
+            try:
+                os.unlink(self._temp_banner_path)
+            except OSError:
+                pass
+        self.destroy()
+
+    def _export_terms(self) -> None:
+        """Write main terms, runner-ups, and excluded terms to a .txt file."""
         if not self.terms:
-            messagebox.showwarning("No terms", "Nothing to export."); return
+            messagebox.showwarning("No terms", "Nothing to export.")
+            return
         dest = filedialog.asksaveasfilename(
-            defaultextension=".txt", filetypes=[("Text", "*.txt")],
+            defaultextension=".txt",
+            filetypes=[("Text", "*.txt")],
             initialfile="extracted_terms.txt",
-            initialdir=str(_downloads_folder()))
-        if dest:
-            with open(dest, "w", encoding="utf-8") as fh:
-                fh.write(f"# Main Terms ({len(self.terms)})\n")
-                for t, w in sorted(self.terms.items(), key=lambda x: x[1], reverse=True):
-                    fh.write(f"{t}\t{w}\n")
-                # Include runner-ups (excluding user-removed terms).
-                visible = {t: w for t, w in self.runner_ups.items()
-                           if t not in self.user_excluded}
-                if visible:
-                    fh.write(f"\n# Runner-Ups ({len(visible)})\n")
-                    for t, w in sorted(visible.items(), key=lambda x: x[1], reverse=True):
-                        fh.write(f"{t}\t{w}\n")
-                # Note excluded terms if any.
-                if self.user_excluded:
-                    fh.write(f"\n# Excluded ({len(self.user_excluded)})\n")
-                    for t in sorted(self.user_excluded):
-                        fh.write(f"{t}\n")
-            total = len(self.terms) + len(visible)
-            log.info("Exported %d terms + %d runner-ups to: %s",
-                     len(self.terms), len(visible), dest)
-            self._set_status(f"Exported to: {dest}")
+            initialdir=str(_downloads_folder()),
+        )
+        if not dest:
+            return
+
+        visible_runners = {
+            t: w
+            for t, w in self.runner_ups.items()
+            if t not in self.user_excluded
+        }
+        with open(dest, "w", encoding="utf-8") as fh:
+            fh.write(f"# Main Terms ({len(self.terms)})\n")
+            for term, weight in sorted(
+                self.terms.items(), key=lambda kv: kv[1], reverse=True
+            ):
+                fh.write(f"{term}\t{weight}\n")
+
+            if visible_runners:
+                fh.write(f"\n# Runner-Ups ({len(visible_runners)})\n")
+                for term, weight in sorted(
+                    visible_runners.items(), key=lambda kv: kv[1], reverse=True
+                ):
+                    fh.write(f"{term}\t{weight}\n")
+
+            if self.user_excluded:
+                fh.write(f"\n# Excluded ({len(self.user_excluded)})\n")
+                for term in sorted(self.user_excluded):
+                    fh.write(f"{term}\n")
+
+        log.info("Exported terms to: %s", dest)
+        self._set_status(f"Exported to: {dest}")
 
 
-def main():
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+def main() -> None:
+    """Launch the application."""
     log.info("Log file: %s", LOG_FILE)
     WordCloudApp().mainloop()
 
