@@ -10,6 +10,21 @@ and works on macOS, Windows, and Linux.
 
 ---
 
+## Example
+
+A fashion and graphic design resume processed with a dark background and
+Vibrant palette.
+
+**Input — resume**
+
+![Sample resume](examples/resume_input.png)
+
+**Output — LinkedIn banner**
+
+![Generated LinkedIn banner](examples/banner_output.png)
+
+---
+
 ## Features
 
 - **AI-Powered Extraction** — Sends your resume to an AI model that understands
@@ -53,6 +68,9 @@ and works on macOS, Windows, and Linux.
 ```
 linkedin-banner-wordcloud-generator/
 ├── linkedin_banner_wordcloud_generator.py   # Main application
+├── examples/
+│   ├── resume_input.png                     # Sample resume
+│   └── banner_output.png                    # Generated banner
 └── providers/
     ├── __init__.py      # Provider registry and get_provider() factory
     ├── base.py          # BaseProvider abstract class
