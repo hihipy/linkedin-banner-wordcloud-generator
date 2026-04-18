@@ -1,50 +1,76 @@
-# linkedin-banner-wordcloud-generator
+# LinkedIn Banner Word Cloud Generator
 
-A Python desktop application that reads your resume (PDF, DOCX, or TXT),
-sends it to an AI provider to extract and weight your most important
-professional terms, and renders a word cloud sized for LinkedIn banners
-(1584 × 396 pixels).
+> Turn your resume into a professional LinkedIn banner — powered by AI.
 
-Supports five AI providers — Claude, ChatGPT, Gemini, Mistral, and Groq —
-and works on macOS, Windows, and Linux.
+A Python desktop app that reads your resume (PDF, DOCX, or TXT), sends it to
+an AI provider to extract and weight your most important professional terms, and
+renders a word cloud sized for LinkedIn banners **(1584 × 396 px)**.
+
+Works for **any industry** — technology, finance, healthcare, law, marketing,
+engineering, education, and more. The AI reads your resume and decides what
+matters for your field.
+
+Supports **Claude, ChatGPT, Gemini, Mistral, and Groq** and runs on
+macOS, Windows, and Linux.
+
+---
+
+## How it works
+
+| Step | What happens |
+|---|---|
+| Browse | Pick your resume (PDF, DOCX, or TXT) |
+| Analyse | AI extracts up to 60 weighted terms + 30 runner-ups |
+| Edit | Remove, add, or promote terms in the live table |
+| Style | Choose background, palette, and separator |
+| Generate | Preview renders instantly in the app |
+| Save As | Export the PNG wherever you want |
 
 ---
 
 ## Features
 
-- **AI-Powered Extraction** — Sends your resume to an AI model that understands
-  your industry and role, extracts relevant skills and domain terms, and assigns
-  importance weights based on how central each term is to your professional
-  identity. Works for any field: technology, finance, healthcare, law,
-  marketing, engineering, education, and more.
-- **Universal Prompt** — The extraction prompt is industry-agnostic. A data
-  scientist gets `pandas`, `Machine Learning`, and `ETL`. A lawyer gets
-  `Contract Law`, `Litigation`, and `Due Diligence`. A nurse gets `Patient
-  Care`, `HIPAA`, and `EHR`. The AI reads the resume and decides what matters.
-- **Smart Deduplication** — Automatically removes single-word terms already
-  covered by a higher-weight compound (e.g. standalone `BI` is dropped when
-  `Power BI` is already present at a higher weight).
-- **Interactive Term Editor** — Review, sort, remove, and manually add terms
-  before generating. Promote runner-up terms into the main list with one click.
-  Auto-backfills from runner-ups when you remove a term.
-- **Live Separator Toggle** — Switch between `Data_Science` and `Data Science`
-  display style at any time. The change applies to the treeview, the export
-  file, and the word cloud output instantly — no re-extraction needed.
-- **Appearance Controls** — Choose light or dark background and one of eight
-  colour palettes (Vibrant, Mono, Ocean, Hot, Rainbow, Viridis, Plasma,
-  Inferno). The Appearance panel only appears after a successful extraction.
-- **Temp-First Save Flow** — Generate runs silently to a temp file. Nothing
-  lands in your Downloads folder until you click **Save As**, choose a
-  location, and confirm. Regenerating replaces the temp file automatically.
-- **File Size Management** — Ensures the output PNG stays under 3 MB using
-  colour quantisation if needed.
-- **Export Terms** — Save the full ranked list (main terms + runner-ups +
-  excluded) to a `.txt` file for reference or further editing.
-- **Dark / Light Theme** — UI theme is detected from the OS at startup
-  (macOS, Windows, Linux all supported).
-- **Cross-Platform** — Tested on macOS, Windows, and Linux. Auto-installs
-  missing Python packages on first run.
-- **Logging** — Detailed logs written to `~/.wordcloud_generator/app.log`.
+### AI-powered extraction
+
+The prompt is industry-agnostic — it reads your resume, identifies your field,
+and extracts what actually matters for your role:
+
+- A **data scientist** gets `pandas`, `Machine Learning`, `ETL`
+- A **lawyer** gets `Contract Law`, `Litigation`, `Due Diligence`
+- A **nurse** gets `Patient Care`, `HIPAA`, `EHR`
+- A **marketer** gets `Brand Strategy`, `SEO`, `HubSpot`
+
+Terms are weighted by how central they are to your professional identity
+(1,000 – 10,000), not just by frequency.
+
+### Term editor
+
+- Sort the table by term name or weight
+- Remove unwanted terms — runner-ups auto-backfill the gap
+- Add terms the AI missed, comma-separated
+- Promote any runner-up into the main list with one click
+
+### Appearance
+
+- **Background:** Light or Dark
+- **Palette:** Vibrant, Mono, Ocean, Hot, Rainbow, Viridis, Plasma, Inferno
+- **Separator:** `Data_Science` (underscore) or `Data Science` (space) —
+  changes apply live to the table and the cloud output, no re-extraction needed
+
+### Save flow
+
+Generate writes to a **temp file** — nothing lands in your Downloads until you
+click **Save As** and confirm. Regenerating replaces the temp file silently.
+The previous temp is cleaned up automatically on regeneration or app close.
+
+### Other
+
+- Smart deduplication — standalone `BI` is dropped when `Power BI` is already present at a higher weight
+- Content validation — detects scanned image PDFs, password-protected files, and binary garbage before sending to the AI
+- File size cap — colour-quantises the PNG if it exceeds 3 MB
+- Dark / light theme follows the OS automatically at startup
+- Auto-installs missing Python packages on first run
+- Detailed logs at `~/.wordcloud_generator/app.log`
 
 ---
 
@@ -52,30 +78,32 @@ and works on macOS, Windows, and Linux.
 
 ```
 linkedin-banner-wordcloud-generator/
+│
 ├── linkedin_banner_wordcloud_generator.py   # Main application
+│
 └── providers/
-    ├── __init__.py      # Provider registry and get_provider() factory
+    ├── __init__.py      # Registry + get_provider() factory
     ├── base.py          # BaseProvider abstract class
-    ├── anthropic.py     # Claude (Anthropic)
+    ├── anthropic.py     # Claude  (Anthropic)
     ├── openai.py        # ChatGPT (OpenAI)
-    ├── google.py        # Gemini (Google)
+    ├── google.py        # Gemini  (Google)
     ├── mistral.py       # Mistral AI
-    └── groq.py          # Groq (Llama)
+    └── groq.py          # Groq    (Llama)
 ```
 
 ---
 
 ## Requirements
 
-- Python 3.9+
-- An API key for at least one supported AI provider (see table below)
+- **Python 3.9+**
+- An API key for at least one AI provider (see table below)
 
 All other Python dependencies install automatically on first run.
 
-> **Linux note:** tkinter is not available via pip. Install it through your
-> package manager first:
+> **Linux users:** tkinter is not available via pip — install it through your
+> package manager before running the app:
 > ```bash
-> sudo apt install python3-tk      # Debian / Ubuntu
+> sudo apt install python3-tk       # Debian / Ubuntu
 > sudo dnf install python3-tkinter  # Fedora / RHEL
 > ```
 
@@ -83,108 +111,88 @@ All other Python dependencies install automatically on first run.
 
 ## AI providers
 
-| Provider | Free tier | Key format | Install |
+| Provider | Free tier | Key starts with | pip package |
 |---|---|---|---|
-| **Claude** (Anthropic) | — | `sk-ant-api03-…` | `pip install anthropic` |
-| **ChatGPT** (OpenAI) | — | `sk-proj-…` | `pip install openai` |
-| **Gemini** (Google) | ✓ | `AIza…` | `pip install google-genai` |
-| **Groq** | ✓ generous | `gsk_…` | `pip install groq` |
-| **Mistral** | — | long random string | `pip install mistralai` |
+| **Claude** — Anthropic | — | `sk-ant-api03-…` | `anthropic` |
+| **ChatGPT** — OpenAI | — | `sk-proj-…` | `openai` |
+| **Gemini** — Google | ✓ | `AIza…` | `google-genai` |
+| **Groq** | ✓ generous | `gsk_…` | `groq` |
+| **Mistral** | — | long random string | `mistralai` |
 
 API keys are stored locally at `~/.wordcloud_generator/config.json`.
-Nothing is sent anywhere except the AI provider you choose.
+Nothing is sent anywhere except the provider you choose.
 
 ---
 
 ## Getting started
 
-1. Clone or download the repository so you have the
-   `linkedin_banner_wordcloud_generator.py` file and the `providers/` folder
-   together in the same directory.
+**1. Get the files**
 
-2. Install at least one AI provider package:
-   ```bash
-   pip install anthropic      # Claude — recommended
-   # or
-   pip install groq           # Groq — free tier, no credit card
-   ```
+Clone or download the repo so that `linkedin_banner_wordcloud_generator.py`
+and the `providers/` folder are in the same directory.
 
-3. Run the application:
-   ```bash
-   python linkedin_banner_wordcloud_generator.py
-   ```
-   On first run the app installs `wordcloud`, `matplotlib`, `Pillow`,
-   `pdfplumber`, `python-docx`, and `darkdetect` automatically.
+**2. Install an AI provider**
 
-4. Click **⚙ Settings**, select your provider, paste your API key, click
-   **Test Connection**, then **Save**.
+```bash
+pip install anthropic   # Claude — best results
+# or
+pip install groq        # Groq   — free tier, no credit card needed
+```
 
----
+**3. Run the app**
 
-## Usage
+```bash
+python linkedin_banner_wordcloud_generator.py
+```
 
-1. Click **Browse …** and select your resume (PDF, DOCX, or TXT).
-2. Click **Analyse Resume**. The AI reads your resume and returns up to
-   60 weighted terms plus 30 runner-ups.
-3. Review the **Extracted Terms** table. You can:
-   - Click column headers to sort by term name or weight.
-   - Select a row and click **− Remove Selected** to drop a term (the
-     highest-weight runner-up auto-fills the gap).
-   - Type a term in **Add term** and click **+ Add** to include something
-     the AI missed.
-   - Pick a runner-up from the dropdown and click **↑ Promote** to move it
-     into the main list.
-4. In the **Appearance** panel (revealed after extraction):
-   - Choose **Light** or **Dark** background.
-   - Choose a colour palette from the dropdown.
-   - Choose **Underscore** or **Space** separator — updates the table and
-     the cloud output live.
-5. Click **Generate Word Cloud**. The banner renders to a temp file and
-   appears in the preview panel.
-6. Click **Save As …** to choose a filename and save location (defaults to
-   Downloads). Clicking **Generate Word Cloud** again re-renders with a
-   fresh random layout; the previous temp file is deleted.
-7. Optionally click **Export Terms (.txt)** to save the full ranked term
-   list for reference.
+On first run, `wordcloud`, `matplotlib`, `Pillow`, `pdfplumber`, `python-docx`,
+and `darkdetect` install automatically.
+
+**4. Connect a provider**
+
+Click **⚙ Settings**, select your provider, paste your API key,
+click **Test Connection**, then **Save**.
 
 ---
 
 ## Technical details
 
-| Detail | Value |
+| | |
 |---|---|
-| Output dimensions | 1584 × 396 px (LinkedIn banner) |
-| Max terms (main) | 60 |
-| Runner-ups | 30 |
+| Output dimensions | 1584 × 396 px |
+| Max terms | 60 main + 30 runner-ups |
 | Weight range | 1,000 – 10,000 |
-| Max resume chars sent to AI | 15,000 |
-| PNG size cap | 3 MB (colour-quantised if exceeded) |
-| Word cloud library | [`wordcloud`](https://github.com/amueller/word_cloud) |
-| Rendering | `matplotlib` → PNG at 300 dpi, previewed with `Pillow` |
-| Config / key storage | `~/.wordcloud_generator/config.json` |
+| Resume chars sent to AI | up to 15,000 |
+| PNG size cap | 3 MB |
+| DPI | 300 |
+| Word cloud library | [wordcloud](https://github.com/amueller/word_cloud) |
+| Rendering | matplotlib → PNG, previewed with Pillow |
+| Key storage | `~/.wordcloud_generator/config.json` |
 | Log file | `~/.wordcloud_generator/app.log` |
 
 ---
 
-## Privacy and security
+## Privacy & security
 
-- Your resume text is sent to the AI provider you choose. Do not process
-  files containing passwords, private keys, or proprietary trade secrets.
-  Check your provider's data usage policy before proceeding.
-- API keys are stored in plaintext in `config.json` on your local machine.
-  Do not share this file or commit it to a repository.
-- No data is collected by this tool. Nothing is logged, transmitted, or
-  stored anywhere other than your local machine and the AI provider you choose.
+**Your resume text is sent to the AI provider you choose.** Do not process
+files containing passwords, private keys, or proprietary trade secrets.
+Review your provider's data-usage policy before using the app with
+sensitive documents.
+
+API keys are stored in plaintext on your local machine. Do not share
+`config.json` or commit it to a repository.
+
+This tool collects no data. Nothing is logged, transmitted, or stored anywhere
+other than your local machine and the AI provider you select.
 
 ---
 
 ## License
 
-Licensed under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/).
+[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
-You are free to use, share, and adapt this work — including for use at your
-job — under these terms:
+Free to use, share, and adapt — including at your job — under these terms:
 
-- **Attribution** — Credit the original author.
-- **NonCommercial** — Not for selling or building commercial products.
-- **ShareAlike** — Derivatives must use the same license.
+- **Attribution** — Credit the original author
+- **NonCommercial** — Not for selling or building commercial products
+- **ShareAlike** — Derivatives must use the same license
