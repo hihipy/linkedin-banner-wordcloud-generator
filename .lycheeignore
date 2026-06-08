@@ -10,3 +10,8 @@
 
 # Example links in code blocks (the dump's "generated_at" timestamp etc).
 example\.com
+
+# AI-vendor homepages that bot-block CI: OpenAI 403s, Google AI 302-loops.
+# Both badge links resolve fine in a browser.
+^https://openai\.com
+^https://ai\.google\.dev
