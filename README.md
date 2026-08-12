@@ -5,7 +5,7 @@
 
 **Built with**
 
-[![Anthropic](https://img.shields.io/badge/Anthropic-D97757?style=flat&logoColor=white)](https://www.anthropic.com)
+[![Claude](https://img.shields.io/badge/Anthropic-D97757?style=flat&logoColor=white)](https://www.anthropic.com)
 [![Gemini](https://img.shields.io/badge/Gemini-8E75B2?style=flat&logo=googlegemini&logoColor=white)](https://ai.google.dev)
 [![Groq](https://img.shields.io/badge/Groq-2D2D2D?style=flat&logoColor=white)](https://groq.com)
 [![Mistral](https://img.shields.io/badge/Mistral-FA520F?style=flat&logo=mistralai&logoColor=white)](https://mistral.ai)
